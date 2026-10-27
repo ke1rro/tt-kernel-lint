@@ -1,0 +1,4 @@
+[flake8]
+max-line-length = 88
+extend-ignore = E203
+extend-exclude = .venv,build,build_*,tt-metal,ttsim,tt-isa-documentation
