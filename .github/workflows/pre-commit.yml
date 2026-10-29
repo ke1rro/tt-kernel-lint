@@ -17,9 +17,6 @@ jobs:
     name: Pre-commit checks
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    env:
-      PRE_COMMIT_HOME: ${{ runner.temp }}/pre-commit
-
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -38,7 +35,7 @@ jobs:
       - name: Cache pre-commit environments
         uses: actions/cache@v5
         with:
-          path: ${{ env.PRE_COMMIT_HOME }}
+          path: ${{ runner.temp }}/pre-commit
           key: pre-commit-${{ runner.os }}-${{ runner.arch }}-${{ steps.python.outputs.python-version }}-${{ hashFiles('.pre-commit-config.yaml', 'requirements-dev.txt') }}
 
       - name: Install development tools
@@ -47,4 +44,6 @@ jobs:
           .venv/bin/python -m pip install -r requirements-dev.txt
 
       - name: Run pre-commit checks
+        env:
+          PRE_COMMIT_HOME: ${{ runner.temp }}/pre-commit
         run: .venv/bin/pre-commit run --all-files --show-diff-on-failure --color=always
