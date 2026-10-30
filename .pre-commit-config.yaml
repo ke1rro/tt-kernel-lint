@@ -31,6 +31,17 @@ repos:
         entry: .venv/bin/python -m flake8
         language: system
         types: [python]
+      - id: cmake-format
+        name: cmake-format
+        entry: .venv/bin/cmake-format
+        language: system
+        files: (^|/)(CMakeLists\.txt|[^/]+\.cmake)$
+        args: ["--in-place"]
+      - id: mdformat
+        name: mdformat
+        entry: .venv/bin/mdformat
+        language: system
+        types: [markdown]
       - id: clang-format
         name: clang-format
         entry: .venv/bin/clang-format
