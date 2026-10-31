@@ -1,0 +1,4 @@
+namespace clang {
+
+
+} // namespace clang

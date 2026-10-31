@@ -11,10 +11,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(LLVM REQUIRED CONFIG)
 find_package(Clang REQUIRED CONFIG)
 
-add_executable(${PROJECT_NAME} main.cpp)
+add_executable(${PROJECT_NAME} main.cpp
+  clang-tidy/init_operation_pairing/LLKInitModule.hpp)
 
 target_include_directories(${PROJECT_NAME} PRIVATE ${LLVM_INCLUDE_DIRS}
-                                                   ${CLANG_INCLUDE_DIRS})
+                                                   ${max_double_precision})
 
 target_link_libraries(
   ${PROJECT_NAME} PRIVATE libclang clangTooling clangAST clangASTMatchers
