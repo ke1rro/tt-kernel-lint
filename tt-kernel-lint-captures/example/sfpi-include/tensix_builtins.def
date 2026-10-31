@@ -1,0 +1,170 @@
+// SFPI 7.90.0 	-*- C++ -*-
+// Machine generated, do not edit
+
+#pragma once
+
+extern "C" {
+unsigned __builtin_rvtt_synth_opcode (unsigned, unsigned) __attribute__((nothrow));
+void __builtin_rvtt_lreg_pressure (unsigned) __attribute__((nothrow));
+unsigned __builtin_rvtt_sfpxlogic (unsigned, unsigned, unsigned) __attribute__((nothrow));
+unsigned __builtin_rvtt_sfpxpred (unsigned, unsigned) __attribute__((nothrow));
+unsigned __builtin_rvtt_sfpxcond (unsigned, unsigned, unsigned) __attribute__((nothrow));
+unsigned __builtin_rvtt_sfpxcmp (__xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpxloadi (volatile unsigned long *, unsigned, unsigned, unsigned, signed) __attribute__((nothrow));
+void __builtin_rvtt_sfpnop () __attribute__((nothrow));
+#if __riscv_xtttensixqsr
+void __builtin_rvtt_sfpbankdone (unsigned, unsigned, unsigned) __attribute__((nothrow));
+#endif
+__xtt_vector __builtin_rvtt_sfpreadlreg (unsigned) __attribute__((nothrow));
+void __builtin_rvtt_sfpwritelreg (__xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpnovalue () __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpselect2 (__xtt_vector2, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpselect4 (__xtt_vector4, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpselect8 (__xtt_vector8, unsigned) __attribute__((nothrow));
+__xtt_vector2 __builtin_rvtt_sfpconcat2 (__xtt_vector, __xtt_vector) __attribute__((nothrow));
+#if __riscv_xtttensixqsr
+void __builtin_rvtt_sfpsetcc (__xtt_vector, unsigned, unsigned) __attribute__((nothrow));
+#else
+void __builtin_rvtt_sfpsetcc (__xtt_vector, unsigned) __attribute__((nothrow));
+#endif
+void __builtin_rvtt_sfpencc (unsigned, unsigned) __attribute__((nothrow));
+void __builtin_rvtt_sfpcompc () __attribute__((nothrow));
+void __builtin_rvtt_sfppushc (unsigned) __attribute__((nothrow));
+void __builtin_rvtt_sfppopc (unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpassign (__xtt_vector) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpassign_lv (__xtt_vector, __xtt_vector) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfploadi (volatile unsigned long *, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfploadi_lv (volatile unsigned long *, __xtt_vector, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpmov (__xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpmov_lv (__xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpexexp (__xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpexexp_lv (__xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpexman (__xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpexman_lv (__xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpabs (__xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpabs_lv (__xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfplz (__xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfplz_lv (__xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpand (__xtt_vector, __xtt_vector) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpand_lv (__xtt_vector, __xtt_vector, __xtt_vector) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpor (__xtt_vector, __xtt_vector) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpor_lv (__xtt_vector, __xtt_vector, __xtt_vector) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpxor (__xtt_vector, __xtt_vector) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpxor_lv (__xtt_vector, __xtt_vector, __xtt_vector) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpnot (__xtt_vector) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpnot_lv (__xtt_vector, __xtt_vector) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpshft_v (__xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpshft_v_lv (__xtt_vector, __xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpshft_i (volatile unsigned long *, __xtt_vector, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpshft_i_lv (volatile unsigned long *, __xtt_vector, __xtt_vector, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+#if __riscv_xtttensixqsr
+__xtt_vector __builtin_rvtt_sfplut (__xtt_vector, unsigned) __attribute__((nothrow));
+#else
+__xtt_vector __builtin_rvtt_sfplut (__xtt_vector, __xtt_vector, __xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+#endif
+#if __riscv_xtttensixqsr
+__xtt_vector __builtin_rvtt_sfplutfp32 (__xtt_vector, unsigned) __attribute__((nothrow));
+#endif
+#if __riscv_xtttensixwh || __riscv_xtttensixbh
+__xtt_vector __builtin_rvtt_sfplutfp32_3r (__xtt_vector, __xtt_vector, __xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfplutfp32_6r (__xtt_vector, __xtt_vector, __xtt_vector, __xtt_vector, __xtt_vector, __xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+#endif
+#if __riscv_xtttensixqsr
+__xtt_vector2 __builtin_rvtt_sfpswap (__xtt_vector, __xtt_vector, unsigned, unsigned) __attribute__((nothrow));
+#else
+__xtt_vector2 __builtin_rvtt_sfpswap (__xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+#endif
+__xtt_vector8 __builtin_rvtt_sfptransp (__xtt_vector, __xtt_vector, __xtt_vector, __xtt_vector, __xtt_vector, __xtt_vector, __xtt_vector, __xtt_vector) __attribute__((nothrow));
+__xtt_vector4 __builtin_rvtt_sfpshft2_copy4 (__xtt_vector, __xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector4 __builtin_rvtt_sfpshft2_subvec_copy4 (__xtt_vector, __xtt_vector, __xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector4 __builtin_rvtt_sfpshft2_subvec_shfl1_copy4 (__xtt_vector, __xtt_vector, __xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpshft2_subvec_shfl1 (__xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpshft2_subvec_shfl1_lv (__xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpload (volatile unsigned long *, unsigned, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpload_lv (volatile unsigned long *, __xtt_vector, unsigned, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+#if __riscv_xtttensixqsr
+__xtt_vector __builtin_rvtt_sfploadsrcs (volatile unsigned long *, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfploadsrcs_lv (volatile unsigned long *, __xtt_vector, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+#endif
+void __builtin_rvtt_sfpstore (volatile unsigned long *, __xtt_vector, unsigned, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+#if __riscv_xtttensixqsr
+void __builtin_rvtt_sfpstoresrcs (volatile unsigned long *, __xtt_vector, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+#endif
+__xtt_vector __builtin_rvtt_sfpiadd_v (__xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpiadd_v_lv (__xtt_vector, __xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpiadd_i (volatile unsigned long *, __xtt_vector, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpiadd_i_lv (volatile unsigned long *, __xtt_vector, __xtt_vector, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpmul (__xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpmul_lv (__xtt_vector, __xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpmuli (volatile unsigned long *, __xtt_vector, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpmuli_lv (volatile unsigned long *, __xtt_vector, __xtt_vector, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpadd (__xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpadd_lv (__xtt_vector, __xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpaddi (volatile unsigned long *, __xtt_vector, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpaddi_lv (volatile unsigned long *, __xtt_vector, __xtt_vector, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpsetexp_v (__xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpsetexp_v_lv (__xtt_vector, __xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpsetexp_i (volatile unsigned long *, __xtt_vector, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpsetexp_i_lv (volatile unsigned long *, __xtt_vector, __xtt_vector, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpsetman_v (__xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpsetman_v_lv (__xtt_vector, __xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpsetman_i (volatile unsigned long *, __xtt_vector, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpsetman_i_lv (volatile unsigned long *, __xtt_vector, __xtt_vector, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpsetsgn_v (__xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpsetsgn_v_lv (__xtt_vector, __xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpsetsgn_i (volatile unsigned long *, __xtt_vector, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpsetsgn_i_lv (volatile unsigned long *, __xtt_vector, __xtt_vector, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpmad (__xtt_vector, __xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpmad_lv (__xtt_vector, __xtt_vector, __xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpdivp2 (volatile unsigned long *, __xtt_vector, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpdivp2_lv (volatile unsigned long *, __xtt_vector, __xtt_vector, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpcast (__xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpcast_lv (__xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpstochrnd (__xtt_vector, unsigned, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpstochrnd_lv (__xtt_vector, __xtt_vector, unsigned, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpstochrnd_descale_v (__xtt_vector, __xtt_vector, unsigned, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpstochrnd_descale_v_lv (__xtt_vector, __xtt_vector, __xtt_vector, unsigned, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpstochrnd_descale_i (volatile unsigned long *, __xtt_vector, unsigned, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpstochrnd_descale_i_lv (volatile unsigned long *, __xtt_vector, __xtt_vector, unsigned, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+#if __riscv_xtttensixbh || __riscv_xtttensixqsr
+__xtt_vector __builtin_rvtt_sfpreadconfig (unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpreadconfig_lv (__xtt_vector, unsigned) __attribute__((nothrow));
+#endif
+void __builtin_rvtt_sfpwriteconfig_v (__xtt_vector, unsigned, unsigned) __attribute__((nothrow));
+void __builtin_rvtt_sfpwriteconfig_i (volatile unsigned long *, unsigned, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+#if __riscv_xtttensixbh
+__xtt_vector __builtin_rvtt_sfpgt (__xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+#elif __riscv_xtttensixqsr
+__xtt_vector __builtin_rvtt_sfpgt (__xtt_vector, __xtt_vector, unsigned, unsigned) __attribute__((nothrow));
+#endif
+#if __riscv_xtttensixbh
+__xtt_vector __builtin_rvtt_sfpgt_lv (__xtt_vector, __xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+#elif __riscv_xtttensixqsr
+__xtt_vector __builtin_rvtt_sfpgt_lv (__xtt_vector, __xtt_vector, __xtt_vector, unsigned, unsigned) __attribute__((nothrow));
+#endif
+#if __riscv_xtttensixbh
+__xtt_vector __builtin_rvtt_sfple (__xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+#elif __riscv_xtttensixqsr
+__xtt_vector __builtin_rvtt_sfple (__xtt_vector, __xtt_vector, unsigned, unsigned) __attribute__((nothrow));
+#endif
+#if __riscv_xtttensixbh
+__xtt_vector __builtin_rvtt_sfple_lv (__xtt_vector, __xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+#elif __riscv_xtttensixqsr
+__xtt_vector __builtin_rvtt_sfple_lv (__xtt_vector, __xtt_vector, __xtt_vector, unsigned, unsigned) __attribute__((nothrow));
+#endif
+#if __riscv_xtttensixbh || __riscv_xtttensixqsr
+__xtt_vector __builtin_rvtt_sfpmul24 (__xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpmul24_lv (__xtt_vector, __xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+#endif
+#if __riscv_xtttensixbh
+__xtt_vector __builtin_rvtt_sfparecip (__xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfparecip_lv (__xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+#endif
+#if __riscv_xtttensixqsr
+__xtt_vector __builtin_rvtt_sfpnonlinear (__xtt_vector, unsigned) __attribute__((nothrow));
+__xtt_vector __builtin_rvtt_sfpnonlinear_lv (__xtt_vector, __xtt_vector, unsigned) __attribute__((nothrow));
+#endif
+void __builtin_rvtt_ttincrwc (signed, signed, signed, signed) __attribute__((nothrow));
+void __builtin_rvtt_ttreplay (volatile unsigned long *, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+void __builtin_rvtt_ttinsn (volatile unsigned long *, unsigned, unsigned, unsigned, unsigned) __attribute__((nothrow));
+}
