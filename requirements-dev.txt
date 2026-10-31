@@ -2,7 +2,10 @@
 black==26.5.1
 clang-format==20.1.8
 clang-tidy==20.1.0
+cmakelang==0.6.13
 flake8==7.3.0
 isort==8.0.1
+mdformat==1.0.0
+mdformat-gfm==1.0.0
 pre-commit==4.7.0
 pre-commit-hooks==5.0.0
