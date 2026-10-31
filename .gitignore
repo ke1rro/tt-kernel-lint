@@ -27,6 +27,7 @@ tt_debug
 .build/
 build
 build_*
+/build-kernels/
 /python_env/
 CMakeUserPresets.json
 .session
