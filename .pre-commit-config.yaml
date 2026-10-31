@@ -1,5 +1,3 @@
-minimum_pre_commit_version: "4.7.0"
-
 exclude: ^(tt-metal|ttsim|tt-isa-documentation|\.venv|build|build_[^/]+)/
 
 repos:
