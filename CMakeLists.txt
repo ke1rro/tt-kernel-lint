@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 4.0)
 
-set(PROJECT_NAME tt-kernel-lint)
+set(PROJECT_NAME tt-kernel-init-static-check)
 project(${PROJECT_NAME} LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -11,8 +11,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(LLVM REQUIRED CONFIG)
 find_package(Clang REQUIRED CONFIG)
 
-add_executable(${PROJECT_NAME} main.cpp
-  clang-tidy/init_operation_pairing/LLKInitModule.hpp)
+add_executable(${PROJECT_NAME}
+  clang-tidy/init_operation_pairing/LLKInitModule.hpp
+  clang-tidy/init_operation_pairing/LLKInitModule.cpp)
 
 target_include_directories(${PROJECT_NAME} PRIVATE ${LLVM_INCLUDE_DIRS}
                                                    ${max_double_precision})
