@@ -36,9 +36,10 @@ repos:
         files: (^|/)(CMakeLists\.txt|[^/]+\.cmake)$
         args: ["--in-place"]
       - id: mdformat
-        name: mdformat
+        name: mdformat (in place)
         entry: .venv/bin/mdformat
         language: system
+        args: []
         types: [markdown]
       - id: clang-format
         name: clang-format

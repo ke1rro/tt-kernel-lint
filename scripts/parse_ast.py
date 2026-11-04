@@ -140,6 +140,7 @@ def frontend_arguments(argv, directory, overlay=None):
             resolved = (directory / path).resolve()
             if (
                 overlay
+                and option in {"-I", "-isystem", "-iquote", "-idirafter"}
                 and resolved.name == "include"
                 and resolved.parent.name == "sfpi"
             ):
@@ -188,13 +189,28 @@ def main():
         "--compat-header", type=Path, help="Clang-only force-included header"
     )
     parser.add_argument(
-        "--sfpi-overlay", type=Path, help="Experimental copy of SFPI include/"
+        "--sfpi-overlay",
+        type=Path,
+        help="Verified Clang-only SFPI include/ overlay from check_sfpi.py",
     )
     parser.add_argument("--ast-filter", default="kernel_main")
     parser.add_argument("--output-dir", type=Path, help="Default: CAPTURE/replay")
     args = parser.parse_args()
     try:
         capture = args.capture.resolve()
+        output = (args.output_dir or capture / "replay").resolve()
+        output.mkdir(parents=True, exist_ok=True)
+        # Invalidate the previous attempt even if input validation fails below.
+        for name in (
+            "replay.json",
+            "syntax.stdout",
+            "syntax.stderr",
+            "syntax.command.json",
+            "ast.stdout",
+            "ast.stderr",
+            "ast.command.json",
+        ):
+            (output / name).unlink(missing_ok=True)
         database = (args.database or capture / "clang/compile_commands.json").resolve()
         entries = json.loads(database.read_text())
         if not isinstance(entries, list):
@@ -211,8 +227,6 @@ def main():
             if not compat.is_file():
                 raise ValueError(f"Missing compatibility header: {compat}")
             argv += ["-include", str(compat)]
-        output = (args.output_dir or capture / "replay").resolve()
-        output.mkdir(parents=True, exist_ok=True)
         report = {
             "database": str(database),
             "entry": entry,
@@ -227,7 +241,8 @@ def main():
         report_path = output / "replay.json"
         report_path.write_text(json.dumps(report, indent=2) + "\n")
         print(
-            f"Working directory: {directory}\nTranslation unit: {entry['file']}\nOutput: {output}",
+            f"Working directory: {directory}\n"
+            f"Translation unit: {entry['file']}\nOutput: {output}",
             flush=True,
         )
         status = run_stage(argv + ["-fsyntax-only"], directory, output, "syntax")

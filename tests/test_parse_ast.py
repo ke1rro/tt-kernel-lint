@@ -150,13 +150,23 @@ class ReplayTests(unittest.TestCase):
         overlay = self.root / "overlay"
         for inc in (["-I../sfpi/include"], ["-isystem", "../sfpi/include"]):
             args = replay.frontend_arguments(
-                ["clang++", *inc, "-I../sfpi/compiler/include", "-DNAME=sfpi/include"],
+                [
+                    "clang++",
+                    *inc,
+                    "-I../sfpi/compiler/include",
+                    "-DNAME=sfpi/include",
+                    "-include",
+                    "../sfpi/include",
+                    "-imacros../sfpi/include",
+                ],
                 self.root,
                 overlay,
             )
             self.assertTrue(any(str(overlay) in arg for arg in args))
             self.assertIn("-I../sfpi/compiler/include", args)
             self.assertIn("-DNAME=sfpi/include", args)
+            self.assertIn("../sfpi/include", args)
+            self.assertIn("-imacros../sfpi/include", args)
         with self.assertRaisesRegex(ValueError, "No SFPI"):
             replay.frontend_arguments(["clang++", "-I."], self.root, overlay)
 
@@ -187,6 +197,24 @@ class ReplayTests(unittest.TestCase):
         result = self.cli("--compat-header", str(self.root / "absent.h"))
         self.assertEqual(result.returncode, 2)
         self.assertIn("Missing compatibility", result.stderr)
+
+    def test_failed_attempt_removes_previous_ast_even_on_invalid_input(self):
+        output = self.root / "replay"
+        output.mkdir()
+        stale = ["ast.stdout", "ast.stderr", "ast.command.json", "replay.json"]
+        for name in stale:
+            (output / name).write_text("previous successful run")
+        result = self.cli()
+        self.assertEqual(result.returncode, 2)
+        for name in stale:
+            self.assertFalse((output / name).exists())
+        entry = self.entry()
+        entry["arguments"][0] = str(self.root / "no-compiler")
+        self.database.write_text(json.dumps([entry]))
+        (output / "ast.stdout").write_text("previous successful run")
+        result = self.cli()
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse((output / "ast.stdout").exists())
 
     def test_compiler_launch_failure_records_status(self):
         entry = self.entry()
