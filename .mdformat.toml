@@ -2,7 +2,7 @@ number = true
 wrap = "keep"
 end_of_line = "lf"
 validate = true
-extensions = ["gfm", "frontmatter"]
+extensions = ["gfm"]
 codeformatters = []
 
 [plugin.tables]
