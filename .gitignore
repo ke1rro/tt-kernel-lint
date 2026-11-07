@@ -2,7 +2,6 @@
 .venv
 .clangd
 .devcontainer/
-.vscode
 .idea
 .cache
 .venv/

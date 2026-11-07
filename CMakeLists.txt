@@ -16,14 +16,19 @@ add_executable(${PROJECT_NAME}
   clang-tidy/init_operation_pairing/LLKInitModule.cpp)
 
 target_include_directories(${PROJECT_NAME} PRIVATE ${LLVM_INCLUDE_DIRS}
-                                                   ${max_double_precision})
+  ${max_double_precision})
 
 target_link_libraries(
-  ${PROJECT_NAME} PRIVATE libclang clangTooling clangAST clangASTMatchers
-                          clangFrontend clangBasic)
+  ${PROJECT_NAME} PRIVATE
+  # libclang clangTooling clangAST clangASTMatchers
+  # clangFrontend clangBasic)
+  clang-cpp LLVM)
+
+target_compile_options(${PROJECT_NAME} PRIVATE
+  $<$<AND:$<CONFIG:Debug>,$<CXX_COMPILER_ID:Clang>>:-fstandalone-debug>)
 
 option(BUILD_KERNELS
-       "Build the Metalium host example and its runtime dependencies" OFF)
+  "Build the Metalium host example and its runtime dependencies" OFF)
 
 if(BUILD_KERNELS)
   set(WITH_PYTHON_BINDINGS OFF)
@@ -34,5 +39,5 @@ if(BUILD_KERNELS)
   target_compile_definitions(
     example_kernel
     PRIVATE
-      EXAMPLE_KERNEL_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/example_kernel")
+    EXAMPLE_KERNEL_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/example_kernel")
 endif()
