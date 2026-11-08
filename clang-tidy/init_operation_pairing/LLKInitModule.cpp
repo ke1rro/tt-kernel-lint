@@ -3,6 +3,7 @@
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Analysis/CFG.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Casting.h"
 #include "clang/ASTMatchers/ASTMatchers.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
 
@@ -21,20 +22,29 @@ public:
             if (!FD || !FD->hasBody()) {
                 return;
             }
+            const clang::SourceManager& SM = *Result.SourceManager;
             std::unique_ptr<clang::CFG> cfg =
                 clang::CFG::buildCFG(FD, FD->getBody(), Result.Context, clang::CFG::BuildOptions());
             if (!cfg) {
                 return;
             }
 
-            for (const auto cfg_block: *cfg) {
-            for (const auto block_element: *cfg_block) {
-                block_element->dump();
-                if (auto statement = block_element.getAs<clang::CFGStmt>()){
-                    // statement->dump();
-                }
-            }
+            for (const auto cfg_block : *cfg) {
+                for (const auto cfg_block_element : *cfg_block) {
+                    if (auto cfg_statement = cfg_block_element.getAs<clang::CFGStmt>()) {
+                        if (auto call_expr = dyn_cast<clang::CallExpr>(cfg_statement->getStmt())) {
+                            if (auto callee = call_expr->getDirectCallee()) {
+                                auto decl_name_info = callee->getNameInfo();
+                                llvm::outs() << decl_name_info.getName() << "\n";
+                                decl_name_info.getLoc().print(llvm::outs(), SM);
+                                llvm::outs() << "\n";
 
+                                decl_name_info.getLoc().dump(SM);
+                                llvm::outs() << "\n";
+                            }
+                        }
+                    }
+                }
             }
         }
     }
