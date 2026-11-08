@@ -22,10 +22,10 @@ static cl::OptionCategory tt_kernel_init_static_check("tt-kernel-init-static-che
 
 auto function_declaration_matcher = functionDecl(isDefinition(), hasName("kernel_main")).bind("function_declaration");
 
-SmallString<128> get_usr(const clang::FunctionDecl* func_declaration) {
+std::string get_usr(const clang::FunctionDecl* func_declaration) {
     llvm::SmallString<128> usr;
     clang::index::generateUSRForDecl(func_declaration, usr);
-    return usr;
+    return usr.str().str();
 }
 
 std::string get_location_string(const clang::SourceManager& SM, clang::SourceLocation loc) {
@@ -38,12 +38,12 @@ std::string get_location_string(const clang::SourceManager& SM, clang::SourceLoc
 }
 
 struct CallInfo {
-    SmallString<128> usr;
+    std::string usr;
     std::string name;
     std::string definition_site;
     std::string call_site;
 
-    CallInfo(SmallString<128> usr_, std::string name_, std::string definition_site_, std::string call_site_) :
+    CallInfo(std::string usr_, std::string name_, std::string definition_site_, std::string call_site_) :
         usr{usr_}, name{name_}, definition_site{definition_site_}, call_site{call_site_} {};
 };
 
@@ -61,14 +61,14 @@ class OpInitCallPrinter : public MatchFinder::MatchCallback {
 public:
     virtual void run(const MatchFinder::MatchResult& Result) {
         if (const auto FD = Result.Nodes.getNodeAs<clang::FunctionDecl>("function_declaration")) {
-            if (!FD || !FD->hasBody()) {
-                return;
-            }
-            auto decl_id = get_usr(FD).str().str();
-            if (func_info_map.count(decl_id)) {
-                return;
-            }
             if (FD->isInvalidDecl()) {
+                return;
+            }
+            if (!FD->hasBody()) {
+                return;
+            }
+            auto decl_id = get_usr(FD);
+            if (func_info_map.count(decl_id)) {
                 return;
             }
             const clang::SourceManager& SM = *Result.SourceManager;
