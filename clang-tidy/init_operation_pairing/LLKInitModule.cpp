@@ -17,7 +17,6 @@ static cl::OptionCategory tt_kernel_init_static_check("tt-kernel-init-static-che
 
 auto function_declaration_matcher = functionDecl(isDefinition(), hasName("kernel_main")).bind("function_declaration");
 
-
 SmallString<128> getUsr(const clang::FunctionDecl* func_declaration) {
     llvm::SmallString<128> usr;
     clang::index::generateUSRForDecl(func_declaration, usr);
@@ -42,6 +41,10 @@ public:
                 for (const auto cfg_block_element : *cfg_block) {
                     if (auto cfg_statement = cfg_block_element.getAs<clang::CFGStmt>()) {
                         if (auto call_expr = dyn_cast<clang::CallExpr>(cfg_statement->getStmt())) {
+                            for (const clang::Expr* arg : call_expr->arguments()) {
+                                arg->dump();  // AST dump
+                                // or: arg->getType().getAsString()
+                            }
                             if (auto func_declaration = call_expr->getDirectCallee()) {
                                 auto usr = getUsr(func_declaration);
                                 llvm::outs() << usr << "\n";
