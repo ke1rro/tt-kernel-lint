@@ -11,32 +11,12 @@
             "program": "${command:cmake.launchTargetPath}",
             "args": [
                 "-p",
-                "/home/user/tt-kernel-lint/tmp/clang",
+                "/home/user/tt-kernel-lint/tmp",
                 "/home/user/tt-kernel-lint/tt-metal/tt_metal/hw/firmware/src/tt-1xx/trisck.cc",
                 "/home/user/tt-kernel-lint/tt-metal/tt_metal/hw/firmware/src/tt-1xx/trisc.cc",
                 "/home/user/tt-kernel-lint/tt-metal/tt_metal/hw/firmware/src/tt-1xx/trisc.cc"
             ],
             "cwd": "${workspaceFolder}"
         },
-        {
-            "name": "tt-lint",
-            "type": "cppdbg",
-            "request": "launch",
-            "program": "${command:cmake.launchTargetPath}",
-            "args": [
-                "-p",
-                "/home/user/tt-kernel-lint/tmp/clang",
-                "/home/user/tt-kernel-lint/tt-metal/tt_metal/hw/firmware/src/tt-1xx/trisck.cc"
-            ],
-            "cwd": "${workspaceFolder}",
-            "MIMode": "gdb",
-            "setupCommands": [
-                {
-                    "description": "Enable pretty-printing for gdb",
-                    "text": "-enable-pretty-printing",
-                    "ignoreFailures": true
-                },
-            ]
-        }
     ]
 }
