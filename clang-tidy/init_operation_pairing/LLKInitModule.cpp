@@ -1,4 +1,5 @@
 #include "clang/Tooling/CommonOptionsParser.h"
+#include "clang/AST/Decl.h"
 #include "clang/Tooling/Tooling.h"
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Analysis/CFG.h"
@@ -6,6 +7,7 @@
 #include "llvm/Support/Casting.h"
 #include "clang/ASTMatchers/ASTMatchers.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
+#include "clang/Index/USRGeneration.h"
 
 using namespace clang::tooling;
 using namespace llvm;
@@ -14,6 +16,13 @@ using namespace clang::ast_matchers;
 static cl::OptionCategory tt_kernel_init_static_check("tt-kernel-init-static-check options");
 
 auto function_declaration_matcher = functionDecl(isDefinition(), hasName("kernel_main")).bind("function_declaration");
+
+
+SmallString<128> getUsr(const clang::FunctionDecl* func_declaration) {
+    llvm::SmallString<128> usr;
+    clang::index::generateUSRForDecl(func_declaration, usr);
+    return usr;
+}
 
 class OpInitCallPrinter : public MatchFinder::MatchCallback {
 public:
@@ -33,14 +42,9 @@ public:
                 for (const auto cfg_block_element : *cfg_block) {
                     if (auto cfg_statement = cfg_block_element.getAs<clang::CFGStmt>()) {
                         if (auto call_expr = dyn_cast<clang::CallExpr>(cfg_statement->getStmt())) {
-                            if (auto callee = call_expr->getDirectCallee()) {
-                                auto decl_name_info = callee->getNameInfo();
-                                llvm::outs() << decl_name_info.getName() << "\n";
-                                decl_name_info.getLoc().print(llvm::outs(), SM);
-                                llvm::outs() << "\n";
-
-                                decl_name_info.getLoc().dump(SM);
-                                llvm::outs() << "\n";
+                            if (auto func_declaration = call_expr->getDirectCallee()) {
+                                auto usr = getUsr(func_declaration);
+                                llvm::outs() << usr << "\n";
                             }
                         }
                     }
