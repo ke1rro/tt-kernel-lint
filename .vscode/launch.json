@@ -12,7 +12,9 @@
             "args": [
                 "-p",
                 "/home/user/tt-kernel-lint/tmp/clang",
-                "/home/user/tt-kernel-lint/tt-metal/tt_metal/hw/firmware/src/tt-1xx/trisck.cc"
+                "/home/user/tt-kernel-lint/tt-metal/tt_metal/hw/firmware/src/tt-1xx/trisck.cc",
+                "/home/user/tt-kernel-lint/tt-metal/tt_metal/hw/firmware/src/tt-1xx/trisc.cc",
+                "/home/user/tt-kernel-lint/tt-metal/tt_metal/hw/firmware/src/tt-1xx/trisc.cc"
             ],
             "cwd": "${workspaceFolder}"
         },
