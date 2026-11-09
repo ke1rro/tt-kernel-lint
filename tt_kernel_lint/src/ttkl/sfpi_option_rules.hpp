@@ -5,27 +5,27 @@
 
 namespace tt::lint::rules {
 
-inline constexpr std::string_view kSfpiCompiler = "riscv-tt-elf-g++";
-inline constexpr std::string_view kClangDriver = "clang++";
+inline constexpr std::string_view kSfpiCompiler{"riscv-tt-elf-g++"};
+inline constexpr std::string_view kClangDriver{"clang++"};
 
-inline constexpr std::string_view kGccStandard = "-std=c++17";
-inline constexpr std::string_view kClangStandard = "-std=c++20";
-inline constexpr std::string_view kStandardPrefix = "-std=";
+inline constexpr std::string_view kGccStandard{"-std=c++17"};
+inline constexpr std::string_view kClangStandard{"-std=c++20"};
+inline constexpr std::string_view kStandardPrefix{"-std="};
 
-inline constexpr std::string_view kCpuPrefix = "-mcpu=";
-inline constexpr std::string_view kTargetPrefix = "--target=";
-inline constexpr std::string_view kMarchPrefix = "-march=";
-inline constexpr std::string_view kMabiPrefix = "-mabi=";
+inline constexpr std::string_view kCpuPrefix{"-mcpu="};
+inline constexpr std::string_view kTargetPrefix{"--target="};
+inline constexpr std::string_view kMarchPrefix{"-march="};
+inline constexpr std::string_view kMabiPrefix{"-mabi="};
 
-inline constexpr std::string_view kDependencyFileReason = "writes a dependency file, the analysis produces no files";
-inline constexpr std::string_view kCxx20BackportReason =
-    "SFPI-only C++20 backport, the command is translated to -std=c++20 instead";
+inline constexpr std::string_view kDependencyFileReason{"writes a dependency file, the analysis produces no files"};
+inline constexpr std::string_view kCxx20BackportReason{
+    "SFPI-only C++20 backport, the command is translated to -std=c++20 instead"};
 
-inline constexpr std::string_view kCompilerReplacedReason = "the analysis parses with Clang, not with the SFPI GCC";
-inline constexpr std::string_view kCpuReplacedReason =
-    "Clang has no TT CPUs, the profile gives the equivalent target, ISA and ABI";
-inline constexpr std::string_view kStandardReplacedReason =
-    "Clang needs real C++20 for the features that the dropped -ftt-* options backport";
+inline constexpr std::string_view kCompilerReplacedReason{"the analysis parses with Clang, not with the SFPI GCC"};
+inline constexpr std::string_view kCpuReplacedReason{
+    "Clang has no TT CPUs, the profile gives the equivalent target, ISA and ABI"};
+inline constexpr std::string_view kStandardReplacedReason{
+    "Clang needs real C++20 for the features that the dropped -ftt-* options backport"};
 
 struct DroppedOption {
     std::string_view name;
@@ -90,21 +90,21 @@ inline constexpr auto kKeptWithOperand = std::to_array<std::string_view>({"-incl
 inline constexpr auto kKeptPrefixes = std::to_array<std::string_view>({"-D", "-U", "-I", "-W"});
 
 // Message formats for llvm::formatv, which takes a null-terminated string.
-inline constexpr const char* kKernelContextMessage = "kernel '{0}': {1}";
-inline constexpr const char* kNoArgumentsMessage = "the command has no arguments";
-inline constexpr const char* kUnsupportedCompilerMessage = "expected {0}, got '{1}'";
-inline constexpr const char* kMissingOperandMessage = "option '{0}' requires an operand";
-inline constexpr const char* kUnexpectedPositionalMessage =
-    "unexpected positional argument '{0}', the source file is '{1}'";
-inline constexpr const char* kRepeatedSourceMessage = "the source file is given more than once";
-inline constexpr const char* kMissingSourceMessage = "the source file '{0}' is not on the command line";
-inline constexpr const char* kRepeatedCpuMessage = "more than one -mcpu option";
-inline constexpr const char* kMissingCpuMessage = "no -mcpu option, the target cannot be determined";
-inline constexpr const char* kUnsupportedCpuMessage = "unsupported -mcpu={0}, profile '{1}' supports: {2}";
-inline constexpr const char* kUnsupportedStandardMessage =
-    "unsupported option '{0}', only {1} is part of the verified Wormhole command set";
-inline constexpr const char* kUnsupportedOptionMessage =
+inline constexpr const char* kKernelContextMessage{"kernel '{0}': {1}"};
+inline constexpr const char* kNoArgumentsMessage{"the command has no arguments"};
+inline constexpr const char* kUnsupportedCompilerMessage{"expected {0}, got '{1}'"};
+inline constexpr const char* kMissingOperandMessage{"option '{0}' requires an operand"};
+inline constexpr const char* kUnexpectedPositionalMessage{
+    "unexpected positional argument '{0}', the source file is '{1}'"};
+inline constexpr const char* kRepeatedSourceMessage{"the source file is given more than once"};
+inline constexpr const char* kMissingSourceMessage{"the source file '{0}' is not on the command line"};
+inline constexpr const char* kRepeatedCpuMessage{"more than one -mcpu option"};
+inline constexpr const char* kMissingCpuMessage{"no -mcpu option, the target cannot be determined"};
+inline constexpr const char* kUnsupportedCpuMessage{"unsupported -mcpu={0}, profile '{1}' supports: {2}"};
+inline constexpr const char* kUnsupportedStandardMessage{
+    "unsupported option '{0}', only {1} is part of the verified Wormhole command set"};
+inline constexpr const char* kUnsupportedOptionMessage{
     "unsupported option '{0}': it is not part of the verified Wormhole command set. Verify its Clang semantics and add "
-    "a rule";
+    "a rule"};
 
 }  // namespace tt::lint::rules

@@ -1,6 +1,7 @@
 #include "ttkl/translator.hpp"
 
 #include <cstddef>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -13,7 +14,7 @@
 
 namespace tt::lint {
 
-char TranslationError::ID = 0;
+char TranslationError::ID{0};
 
 void TranslationError::log(llvm::raw_ostream& os) const { os << message_; }
 
@@ -32,22 +33,22 @@ bool Contains(std::span<const std::string_view> values, std::string_view value) 
     return false;
 }
 
-const DroppedOption* FindExact(std::span<const DroppedOption> options, std::string_view argument) {
-    for (const DroppedOption& option : options) {
-        if (option.name == argument) {
-            return &option;
+std::optional<std::string_view> FindExact(std::span<const DroppedOption> options, std::string_view argument) {
+    for (const auto& [name, reason] : options) {
+        if (name == argument) {
+            return reason;
         }
     }
-    return nullptr;
+    return std::nullopt;
 }
 
-const DroppedOption* FindPrefix(std::span<const DroppedOption> options, std::string_view argument) {
-    for (const DroppedOption& option : options) {
-        if (argument.starts_with(option.name)) {
-            return &option;
+std::optional<std::string_view> FindPrefix(std::span<const DroppedOption> options, std::string_view argument) {
+    for (const auto& [name, reason] : options) {
+        if (argument.starts_with(name)) {
+            return reason;
         }
     }
-    return nullptr;
+    return std::nullopt;
 }
 
 bool HasKeptPrefix(std::string_view argument) {
@@ -63,9 +64,9 @@ class CommandTranslation {
     const Context& context_;
     const ToolchainProfile& profile_;
     TranslationResult result_;
-    bool needs_cxx20_ = false;
-    bool has_cpu_ = false;
-    bool has_source_ = false;
+    bool needs_cxx20_{false};
+    bool has_cpu_{false};
+    bool has_source_{false};
 
 public:
     CommandTranslation(const Context& context, const ToolchainProfile& profile) :
@@ -78,7 +79,7 @@ private:
 
     template <typename... Values>
     [[nodiscard]] llvm::Error Fail(TranslationErrorKind kind, const char* format, Values&&... values) const {
-        const std::string detail = llvm::formatv(format, std::forward<Values>(values)...).str();
+        const std::string detail{llvm::formatv(format, std::forward<Values>(values)...).str()};
         return llvm::make_error<TranslationError>(
             kind, llvm::formatv(kKernelContextMessage, context_.kernel().name, detail).str());
     }
@@ -150,19 +151,19 @@ llvm::Error CommandTranslation::TranslateCpu(std::string_view argument) {
     if (has_cpu_) {
         return Fail(TranslationErrorKind::kMalformedCommand, kRepeatedCpuMessage);
     }
-    const std::string_view mcpu = argument.substr(kCpuPrefix.size());
-    for (const CpuMapping& cpu : profile_.cpus) {
-        if (cpu.mcpu != mcpu) {
+    const std::string_view mcpu{argument.substr(kCpuPrefix.size())};
+    for (const auto& [name, triple, march, mabi] : profile_.cpus) {
+        if (name != mcpu) {
             continue;
         }
         has_cpu_ = true;
-        const std::string target = std::string(kTargetPrefix) + cpu.triple;
-        const std::string march = std::string(kMarchPrefix) + cpu.march;
-        const std::string mabi = std::string(kMabiPrefix) + cpu.mabi;
-        Replace(argument, target + " " + march + " " + mabi, kCpuReplacedReason);
-        Keep(target);
-        Keep(march);
-        Keep(mabi);
+        const std::string target_option{std::string(kTargetPrefix) + triple};
+        const std::string march_option{std::string(kMarchPrefix) + march};
+        const std::string mabi_option{std::string(kMabiPrefix) + mabi};
+        Replace(argument, target_option + " " + march_option + " " + mabi_option, kCpuReplacedReason);
+        Keep(target_option);
+        Keep(march_option);
+        Keep(mabi_option);
         return llvm::Error::success();
     }
     std::string supported;
@@ -174,24 +175,24 @@ llvm::Error CommandTranslation::TranslateCpu(std::string_view argument) {
 }
 
 llvm::Error CommandTranslation::TranslateArgument(std::size_t& index) {
-    const std::string_view argument = arguments()[index];
+    const std::string_view argument{arguments()[index]};
 
     if (!argument.starts_with('-')) {
         return TranslateSource(argument);
     }
-    if (const DroppedOption* option = FindExact(kDroppedFlags, argument)) {
-        Remove(argument, option->reason);
+    if (const auto reason = FindExact(kDroppedFlags, argument)) {
+        Remove(argument, *reason);
         return llvm::Error::success();
     }
-    if (const DroppedOption* option = FindPrefix(kDroppedPrefixes, argument)) {
-        Remove(argument, option->reason);
+    if (const auto reason = FindPrefix(kDroppedPrefixes, argument)) {
+        Remove(argument, *reason);
         return llvm::Error::success();
     }
-    if (const DroppedOption* option = FindExact(kDroppedWithOperand, argument)) {
-        if (llvm::Error error = RequireOperand(index)) {
+    if (const auto reason = FindExact(kDroppedWithOperand, argument)) {
+        if (llvm::Error error{RequireOperand(index)}) {
             return error;
         }
-        Remove(std::string(argument) + " " + arguments()[index + 1], option->reason);
+        Remove(std::string(argument) + " " + arguments()[index + 1], *reason);
         ++index;
         return llvm::Error::success();
     }
@@ -202,7 +203,7 @@ llvm::Error CommandTranslation::TranslateArgument(std::size_t& index) {
         return TranslateStandard(argument);
     }
     if (Contains(kKeptWithOperand, argument)) {
-        if (llvm::Error error = RequireOperand(index)) {
+        if (llvm::Error error{RequireOperand(index)}) {
             return error;
         }
         Keep(argument);
@@ -220,7 +221,7 @@ llvm::Expected<TranslationResult> CommandTranslation::Run() && {
     if (arguments().empty()) {
         return Fail(TranslationErrorKind::kMalformedCommand, kNoArgumentsMessage);
     }
-    const std::string& compiler = arguments().front();
+    const std::string& compiler{arguments().front()};
     if (llvm::sys::path::filename(compiler) != llvm::StringRef(kSfpiCompiler)) {
         return Fail(
             TranslationErrorKind::kUnsupportedCompiler,
@@ -238,8 +239,8 @@ llvm::Expected<TranslationResult> CommandTranslation::Run() && {
     Replace(compiler, kClangDriver, kCompilerReplacedReason);
     Keep(kClangDriver);
 
-    for (std::size_t index = 1; index < arguments().size(); ++index) {
-        if (llvm::Error error = TranslateArgument(index)) {
+    for (std::size_t index{1}; index < arguments().size(); ++index) {
+        if (llvm::Error error{TranslateArgument(index)}) {
             return std::move(error);
         }
     }
