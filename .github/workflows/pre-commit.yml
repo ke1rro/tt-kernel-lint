@@ -43,6 +43,21 @@ jobs:
           python -m venv .venv
           .venv/bin/python -m pip install -r requirements-dev.txt
 
+      - name: Install LLVM 20
+        run: |
+          wget -qO llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 20
+          rm llvm.sh
+          sudo apt-get install -y --no-install-recommends llvm-20-dev
+
+      - name: Configure CMake for clang-tidy
+        run: |
+          .venv/bin/python -m pip install cmake ninja
+          PATH="$PWD/.venv/bin:$PATH" cmake -S . -B build -G Ninja \
+            -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20 \
+            -DLLVM_DIR=/usr/lib/llvm-20/lib/cmake/llvm -DBUILD_KERNELS=OFF
+
       - name: Run pre-commit checks
         env:
           PRE_COMMIT_HOME: ${{ runner.temp }}/pre-commit
