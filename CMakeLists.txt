@@ -1,7 +1,6 @@
 cmake_minimum_required(VERSION 4.0)
 
-set(PROJECT_NAME tt-kernel-lint)
-project(${PROJECT_NAME} LANGUAGES C CXX)
+project(tt-kernel-lint LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -9,24 +8,28 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(LLVM REQUIRED CONFIG)
-find_package(Clang REQUIRED CONFIG)
 
-add_executable(${PROJECT_NAME} main.cpp)
-
-target_include_directories(${PROJECT_NAME} PRIVATE ${LLVM_INCLUDE_DIRS}
-                                                   ${CLANG_INCLUDE_DIRS})
-
-target_link_libraries(
-  ${PROJECT_NAME} PRIVATE libclang clangTooling clangAST clangASTMatchers
-                          clangFrontend clangBasic)
-
-add_library(tt_kernel_lint_frontend INTERFACE)
+add_library(tt_kernel_lint_frontend STATIC
+            tt_kernel_lint/src/ttkl/translator.cpp)
 target_include_directories(tt_kernel_lint_frontend
-                           INTERFACE tt_kernel_lint/include)
+                           PUBLIC tt_kernel_lint/include)
 target_include_directories(tt_kernel_lint_frontend SYSTEM
-                           INTERFACE ${LLVM_INCLUDE_DIRS})
-target_link_libraries(tt_kernel_lint_frontend INTERFACE LLVMSupport)
-target_link_libraries(${PROJECT_NAME} PRIVATE tt_kernel_lint_frontend)
+                           PUBLIC ${LLVM_INCLUDE_DIRS})
+target_link_libraries(tt_kernel_lint_frontend PUBLIC LLVMSupport)
+
+if(NOT LLVM_ENABLE_RTTI)
+  target_compile_options(tt_kernel_lint_frontend PRIVATE -fno-rtti)
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+  find_package(GTest REQUIRED)
+  include(GoogleTest)
+  add_executable(tt_kernel_lint_tests tests/cpp/translator_test.cpp)
+  target_link_libraries(tt_kernel_lint_tests PRIVATE tt_kernel_lint_frontend
+                                                     GTest::gtest_main)
+  gtest_discover_tests(tt_kernel_lint_tests)
+endif()
 
 option(BUILD_KERNELS
        "Build the Metalium host example and its runtime dependencies" OFF)
