@@ -20,6 +20,14 @@ target_link_libraries(
   ${PROJECT_NAME} PRIVATE libclang clangTooling clangAST clangASTMatchers
                           clangFrontend clangBasic)
 
+add_library(tt_kernel_lint_frontend INTERFACE)
+target_include_directories(tt_kernel_lint_frontend
+                           INTERFACE tt_kernel_lint/include)
+target_include_directories(tt_kernel_lint_frontend SYSTEM
+                           INTERFACE ${LLVM_INCLUDE_DIRS})
+target_link_libraries(tt_kernel_lint_frontend INTERFACE LLVMSupport)
+target_link_libraries(${PROJECT_NAME} PRIVATE tt_kernel_lint_frontend)
+
 option(BUILD_KERNELS
        "Build the Metalium host example and its runtime dependencies" OFF)
 
