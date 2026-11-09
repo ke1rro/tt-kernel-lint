@@ -35,6 +35,7 @@ struct TranslationResult {
 
 enum class TranslationErrorKind {
     kMalformedCommand,
+    kUnsupportedCompiler,
     kUnsupportedCpu,
     kUnsupportedOption,
 };
@@ -54,5 +55,13 @@ public:
     void log(llvm::raw_ostream& os) const override;
     [[nodiscard]] std::error_code convertToErrorCode() const override;
 };
+
+/**
+ * Translates a captured SFPI GCC command into a Clang command. The input is not modified.
+ *
+ * Every option must be known: an option outside the verified Wormhole command set is an error, not a pass-through.
+ */
+[[nodiscard]] llvm::Expected<TranslationResult> TranslateSfpiCommand(
+    const Context& context, const ToolchainProfile& profile);
 
 }  // namespace tt::lint

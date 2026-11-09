@@ -45,7 +45,7 @@ repos:
         name: clang-format
         entry: .venv/bin/clang-format
         language: system
-        files: ^tt-lint/(include|src)/.*\.(c|cc|cpp|cxx|h|hh|hpp|hxx|ipp|tpp)$
+        files: ^tt_kernel_lint/(include|src)/.*\.(c|cc|cpp|cxx|h|hh|hpp|hxx|ipp|tpp)$
         args: ["--style=file", "--dry-run", "--Werror"]
       - id: clang-tidy
         name: clang-tidy
@@ -55,8 +55,8 @@ repos:
           exit 1; fi;
           exec .venv/bin/clang-tidy -p build "$@"' --
         language: system
-        files: ^tt-lint/(include|src)/.*\.(c|cc|cpp|cxx|h|hh|hpp|hxx|ipp|tpp)$
+        files: ^tt_kernel_lint/(include|src)/.*\.(c|cc|cpp|cxx|h|hh|hpp|hxx|ipp|tpp)$
         args:
           - --config-file=.clang-tidy
-          - --header-filter=(^|/)tt-lint/(include|src)/
+          - --header-filter=(^|/)tt_kernel_lint/(include|src)/
           - --warnings-as-errors=*
