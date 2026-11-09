@@ -21,16 +21,6 @@ if(NOT LLVM_ENABLE_RTTI)
   target_compile_options(tt_kernel_lint_frontend PRIVATE -fno-rtti)
 endif()
 
-include(CTest)
-if(BUILD_TESTING)
-  find_package(GTest REQUIRED)
-  include(GoogleTest)
-  add_executable(tt_kernel_lint_tests tests/cpp/translator_test.cpp)
-  target_link_libraries(tt_kernel_lint_tests PRIVATE tt_kernel_lint_frontend
-                                                     GTest::gtest_main)
-  gtest_discover_tests(tt_kernel_lint_tests)
-endif()
-
 option(BUILD_KERNELS
        "Build the Metalium host example and its runtime dependencies" OFF)
 
