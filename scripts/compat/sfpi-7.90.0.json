@@ -1,0 +1,34 @@
+{
+  "version": "7.90.0",
+  "build": "1068",
+  "manifest": {
+    "sfpi_repo": "https://github.com/tenstorrent/sfpi",
+    "sfpi_version": "7.90.0",
+    "sfpi_base": "",
+    "sfpi_build": "1068",
+    "sfpi_hashtype": "sha256",
+    "sfpi_aarch64_debian_txz_hash": "49c289c0d8b83118dba6b93e37bbc32a6a6959072b99f2dc402e849e4f540c8d",
+    "sfpi_aarch64_debian_deb_hash": "59d8ccc98a9eb5c4273106de0cbddd8c81a61792ccc829d0bce7467ae599c9c8",
+    "sfpi_x86_64_debian_txz_hash": "87cf261ae9dc75d10942730216a3e474c3dd5bb38341ea0dfffabf9aa0e5844e",
+    "sfpi_x86_64_debian_deb_hash": "49cc8d94b4aa5207bc6e481cf6d1b0851f129eec7034ea9e193f675da8487c5b",
+    "sfpi_x86_64_fedora_txz_hash": "9d66566a119a34a91b663a4243f95aafb3300ed75a8ef3d817440e94156d7c0b",
+    "sfpi_x86_64_fedora_rpm_hash": "4c66044d7bffe8bf3c2e2cea292433a5bc22aa8cd1af1f4b4bcd883b88b6b2a6"
+  },
+  "headers_sha256": {
+    "lltt.h": "a3284689b921cb80805bcac8d9f93d485a6ee1d450809c10cda673311c5fe76c",
+    "sfpi.h": "c7c9701723972b87fd38f2faf30f8efbfca8883257b5e39752175d5221cbb1e0",
+    "sfpi_builtins.h": "a84c3d6145082682248ccd37f44d286d5fe0235aa90e7d3dd73b65bc19a3b81b",
+    "sfpi_classes.h": "038a2e8fde047728bee3918aee2a945cf70f27c979d60daeb7be325d42c8f194",
+    "sfpi_constants.h": "392ab7b8ec0c01a8e9b8eb3090b057b1c36fce638666aa4d2c925b10abde3510",
+    "sfpi_fp16.h": "a84c3d6145082682248ccd37f44d286d5fe0235aa90e7d3dd73b65bc19a3b81b",
+    "sfpi_funcs.h": "3c7a416371390bed854cc8b523fd6254055d6b1ed49f31d3f8f95b70b2542a76",
+    "sfpi_lib.h": "b7a6fa998c890887f1d345dc09ce290713a562b1e4ad263a0293580a0e467210",
+    "tensix_builtins.def": "b4f83759f7d5350219d8d9bf884327d6dc5337bb63d3ecff73b940d390111496",
+    "tensix_builtins.h": "27b7c2e52ea6d15df24e1898fcd9e7027633e32c2a176992cb73ad228f5c4bdd"
+  },
+  "patch": {
+    "file": "sfpi.h",
+    "before": "sfpi_inline vInt (impl_::vMag);",
+    "after": "sfpi_inline explicit vInt (impl_::vMag);"
+  }
+}

@@ -1,7 +1,6 @@
 cmake_minimum_required(VERSION 4.0)
 
-set(PROJECT_NAME tt-kernel-lint)
-project(${PROJECT_NAME} LANGUAGES C CXX)
+project(tt-kernel-lint LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -9,16 +8,18 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(LLVM REQUIRED CONFIG)
-find_package(Clang REQUIRED CONFIG)
 
-add_executable(${PROJECT_NAME} main.cpp)
+add_library(tt_kernel_lint_frontend STATIC
+            tt_kernel_lint/src/ttkl/translator.cpp)
+target_include_directories(tt_kernel_lint_frontend
+                           PUBLIC tt_kernel_lint/include)
+target_include_directories(tt_kernel_lint_frontend SYSTEM
+                           PUBLIC ${LLVM_INCLUDE_DIRS})
+target_link_libraries(tt_kernel_lint_frontend PUBLIC LLVMSupport)
 
-target_include_directories(${PROJECT_NAME} PRIVATE ${LLVM_INCLUDE_DIRS}
-                                                   ${CLANG_INCLUDE_DIRS})
-
-target_link_libraries(
-  ${PROJECT_NAME} PRIVATE libclang clangTooling clangAST clangASTMatchers
-                          clangFrontend clangBasic)
+if(NOT LLVM_ENABLE_RTTI)
+  target_compile_options(tt_kernel_lint_frontend PRIVATE -fno-rtti)
+endif()
 
 option(BUILD_KERNELS
        "Build the Metalium host example and its runtime dependencies" OFF)
