@@ -1,0 +1,2729 @@
+version: '1.0'
+description: Formal specification of Tenstorrent Tensix Compute and Data Movement APIs, invariants, hardware contracts, and
+  failure modes for static analysis.
+architectures:
+- Wormhole_B0
+- Blackhole
+- Quasar
+threads:
+- id: TRISC0_UNPACK
+  name: TRISC0 (UNPACK)
+  description: Unrolls tiles from CBs/DFBs into SrcA and SrcB physical registers, drives unpacker face geometry.
+- id: TRISC1_MATH
+  name: TRISC1 (MATH)
+  description: Executes FPU matrix multiplications, SFPU vector math, and ALU operations; writes into DST.
+- id: TRISC2_PACK
+  name: TRISC2 (PACK)
+  description: Reads computed tiles/rows from DST, quantizes/formats data, and writes to output CBs/DFBs.
+- id: DM_BRISC
+  name: BRISC (Data Movement Primary)
+  description: Executes asynchronous NoC operations (read, write, atomic, multicast) and Circular Buffer management.
+- id: DM_NCRISC
+  name: NCRISC (Data Movement Secondary)
+  description: Executes asynchronous NoC operations and Circular Buffer management in parallel with BRISC.
+states:
+- id: UNINITIALIZED
+  description: Kernel entry before compute_kernel_hw_startup has run.
+- id: CANONICAL_IDLE
+  description: Hardware configured with standard 32x32 tile descriptors, default pack mode, zero edge masks, no active specialized
+    state.
+- id: MATH_IDLE
+  description: MATH thread is not holding a DST section.
+- id: MATH_DST_HELD
+  description: MATH thread has acquired DST lock via tile_regs_acquire and can write to DST.
+- id: PACK_IDLE
+  description: PACK thread is not holding a DST section.
+- id: PACK_DST_HELD
+  description: PACK thread has waited for MATH commit via tile_regs_wait and can read from DST.
+- id: CB_TILES_AVAILABLE
+  description: Circular buffer front has been waited on and contains at least requested tile count.
+- id: CB_SLOTS_RESERVED
+  description: Circular buffer back has been reserved and has sufficient free slots for writing.
+- id: NOC_READ_IN_FLIGHT
+  description: Asynchronous NoC read transaction has been queued but not yet synchronized with a barrier.
+- id: NOC_WRITE_IN_FLIGHT
+  description: Asynchronous NoC write transaction has been queued but not yet synchronized with a barrier.
+- id: IN_TILIZE_MODE
+  description: Unpacker and packer configured for row-at-a-time tilize conversion. PackMode::Tilize armed on Blackhole.
+- id: IN_UNTILIZE_MODE
+  description: Packer or unpacker configured for tile-to-row untilize conversion. Non-canonical dest offset registers armed.
+- id: IN_REDUCE_MODE
+  description: Packer reduce edge masks active (_llk_pack_reduce_mask_config_). Any non-reduce pack will zero non-reduction
+    elements.
+- id: IN_UNARY_BCAST_MODE
+  description: Unpacker configured to broadcast lines/faces into SrcB; Math configured for B2D datacopy.
+- id: IN_CUSTOM_MM_DENSE_MODE
+  description: Packer Z/W strides configured for 16-row / 32-row dense destination layout.
+instructions:
+- name: compute_kernel_hw_startup
+  signature: template <SrcOrder src_order = SrcOrder::Regular> void compute_kernel_hw_startup(uint32_t icb0, uint32_t icb1,
+    uint32_t ocb)
+  header: tt_metal/hw/inc/api/compute/compute_kernel_hw_startup.h
+  category: startup
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  - TRISC2_PACK
+  placement: entry_block_only
+  allowed_in_loop: false
+  state_machine:
+    precondition_state: UNINITIALIZED
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: null
+  parameters:
+  - name: src_order
+    type: SrcOrder
+    is_template: true
+    description: 'Operand mapping: Regular (icb0->SrcA, icb1->SrcB) or Reverse (icb0->SrcB, icb1->SrcA for matmul)'
+  - name: icb0
+    type: uint32_t
+    is_template: false
+    description: Input circular buffer 0 index
+  - name: icb1
+    type: uint32_t
+    is_template: false
+    description: Input circular buffer 1 index
+  - name: ocb
+    type: uint32_t
+    is_template: false
+    description: Output circular buffer index
+  hardware_effects:
+  - MMIO writes to unpack tile descriptors (tile byte sizes, face counts)
+  - MMIO writes to ALU format specification registers (ALU_FORMAT_SPEC_REG)
+  - Packer destination offset registers reset (llk_pack_dest_init)
+  - Sync mode register armed (DST_SYNC_MODE)
+  - ComputeKernelSentinel baseline state updated
+  failure_mode: Calling mid-kernel causes slow MMIO stalls and execution unit race conditions. Omitting SrcOrder::Reverse
+    for matmul inverts matrix multiplication operands.
+  description: Mandatory one-time hardware initialization performed at kernel entry before any compute or copy operation.
+- name: compute_kernel_hw_cleanup
+  signature: void compute_kernel_hw_cleanup()
+  header: tt_metal/hw/inc/api/compute/experimental/compute_kernel_hw_cleanup.h
+  category: cleanup
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  - TRISC2_PACK
+  placement: between_completed_ops
+  allowed_in_loop: false
+  state_machine:
+    precondition_state: ANY
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: null
+  parameters: []
+  hardware_effects:
+  - Normalizes formats to Float16_b, 32x32, 4 faces on cfg bank 0
+  - Resets math/pack destination semaphores and ping-pong state
+  - Clears Blackhole destination read address remap
+  - Poisons unpack/math MOPs and ADDR_MOD_0..7 to force explicit op re-init
+  failure_mode: Calling while mailboxes are active or semaphores have not drained causes deadlock.
+  description: Blackhole compute hardware normalization barrier resetting mutable configuration to canonical baseline.
+- name: enable_fp32_dest_acc
+  signature: void enable_fp32_dest_acc()
+  header: tt_metal/hw/inc/api/compute/compute_kernel_hw_startup.h
+  category: startup
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  - TRISC2_PACK
+  placement: anywhere
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: disable_fp32_dest_acc
+  parameters: []
+  hardware_effects:
+  - ALU_ACC_CTRL Fp32_enabled set to 1
+  - SFPU_Fp32_enabled set to 1
+  - PCK_DEST_RD_CTRL Read_32b_data set to 1
+  - Synchronizes all 3 TRISCs via tensix_sync before and after CFG write
+  failure_mode: Failing to call on all 3 TRISCs simultaneously deadlocks mailboxes. Omitting paired disable leaves packer
+    in 32-bit mode for 16-bit tiles.
+  description: Dynamically enables 32-bit destination register accumulation across Math and Pack pipelines.
+- name: disable_fp32_dest_acc
+  signature: void disable_fp32_dest_acc()
+  header: tt_metal/hw/inc/api/compute/compute_kernel_hw_startup.h
+  category: startup
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  - TRISC2_PACK
+  placement: anywhere
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: enable_fp32_dest_acc
+  parameters: []
+  hardware_effects:
+  - ALU_ACC_CTRL Fp32_enabled set to 0
+  - SFPU_Fp32_enabled set to 0
+  - PCK_DEST_RD_CTRL Read_32b_data set to 0
+  failure_mode: Mismatched accumulation mode with output packer format causes tile corruption.
+  description: Dynamically disables 32-bit destination accumulation, reverting to 16-bit accumulation mode.
+- name: restore_fp32_dest_acc
+  signature: template <bool is_fp32_dest_acc_en = DST_ACCUM_MODE> void restore_fp32_dest_acc()
+  header: tt_metal/hw/inc/api/compute/compute_kernel_hw_startup.h
+  category: startup
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  - TRISC2_PACK
+  placement: anywhere
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: null
+  parameters:
+  - name: is_fp32_dest_acc_en
+    type: bool
+    is_template: true
+    description: Kernel compile-time baseline accumulation mode
+  hardware_effects:
+  - Restores ALU_ACC_CTRL and PCK_DEST_RD_CTRL to kernel's compile-time DST_ACCUM_MODE
+  failure_mode: Omitting restore leaves hardware accumulation mode permanently inverted for subsequent operations.
+  description: Restores Destination register accumulation mode to the kernel's compile-time default.
+- name: tile_regs_acquire
+  signature: void tile_regs_acquire()
+  header: tt_metal/hw/inc/api/compute/reg_api.h
+  category: reg_lifecycle
+  thread_affinity:
+  - TRISC1_MATH
+  - TRISC0_UNPACK
+  placement: before_compute_writes
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_IDLE
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: tile_regs_commit
+  parameters: []
+  hardware_effects:
+  - Blocks MATH thread until hardware destination section semaphore is granted
+  - Opens UNPACK destination section on Quasar unpack-to-dest
+  failure_mode: Double acquire without commit causes instant deadlock. Nesting inside an accumulation loop causes release
+    to zero out partial sums.
+  description: Acquires exclusive lock on Destination register section for Math thread computation.
+- name: tile_regs_commit
+  signature: template <bool is_fp32_dest_acc_en = DST_ACCUM_MODE> void tile_regs_commit()
+  header: tt_metal/hw/inc/api/compute/reg_api.h
+  category: reg_lifecycle
+  thread_affinity:
+  - TRISC1_MATH
+  - TRISC0_UNPACK
+  placement: after_compute_writes
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_IDLE
+    must_pair_with: tile_regs_acquire
+  parameters:
+  - name: is_fp32_dest_acc_en
+    type: bool
+    is_template: true
+    description: Current accumulation mode matching hardware
+  hardware_effects:
+  - Flushes Math writes to DST
+  - Signals hardware semaphore that Math section is done, unblocking Pack thread
+  failure_mode: Committing without acquire or with mismatched accumulation mode causes hardware hang or corrupted math-pack
+    phase.
+  description: Releases Destination register lock from Math thread and hands the section off to the Packer.
+- name: tile_regs_wait
+  signature: void tile_regs_wait()
+  header: tt_metal/hw/inc/api/compute/reg_api.h
+  category: reg_lifecycle
+  thread_affinity:
+  - TRISC2_PACK
+  placement: before_pack_reads
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: PACK_IDLE
+    postcondition_state: PACK_DST_HELD
+    must_pair_with: tile_regs_release
+  parameters: []
+  hardware_effects:
+  - Blocks PACK thread until Math thread signals completion of destination section
+  failure_mode: Waiting without matching Math commit hangs the Pack thread forever.
+  description: Acquires exclusive lock on Destination register section for Pack thread reading.
+- name: tile_regs_release
+  signature: template <bool is_fp32_dest_acc_en = DST_ACCUM_MODE> void tile_regs_release()
+  header: tt_metal/hw/inc/api/compute/reg_api.h
+  category: reg_lifecycle
+  thread_affinity:
+  - TRISC2_PACK
+  placement: after_pack_reads
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: PACK_DST_HELD
+    postcondition_state: PACK_IDLE
+    must_pair_with: tile_regs_wait
+  parameters:
+  - name: is_fp32_dest_acc_en
+    type: bool
+    is_template: true
+    description: Current accumulation mode matching hardware
+  hardware_effects:
+  - Flushes pack reads
+  - Zeroes Destination register section (ZEROACC)
+  - Frees destination section back to Math thread pool
+  failure_mode: Releasing without wait or omitting release causes Math thread to starve and hang on subsequent acquire.
+  description: Releases Destination register lock from Pack thread, zeroing the section and returning it to Math.
+- name: acquire_dst
+  signature: void acquire_dst()
+  header: tt_metal/hw/inc/api/compute/reg_api.h
+  category: reg_lifecycle
+  thread_affinity:
+  - TRISC1_MATH
+  - TRISC2_PACK
+  placement: before_compute_and_pack
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_IDLE
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: release_dst
+  parameters: []
+  hardware_effects:
+  - Blocks both MATH and PACK threads simultaneously until DST is acquired (coupled lockstep)
+  failure_mode: Mixing coupled acquire_dst with decoupled tile_regs_* creates semaphore protocol deadlocks.
+  description: Deprecated legacy synchronous DST acquire blocking both Math and Pack pipelines simultaneously.
+- name: release_dst
+  signature: void release_dst()
+  header: tt_metal/hw/inc/api/compute/reg_api.h
+  category: reg_lifecycle
+  thread_affinity:
+  - TRISC1_MATH
+  - TRISC2_PACK
+  placement: after_compute_and_pack
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_IDLE
+    must_pair_with: acquire_dst
+  parameters: []
+  hardware_effects:
+  - Releases coupled lockstep DST reservation across Math and Pack
+  failure_mode: Mismatched calling between Math and Pack threads deadlocks synchronization hardware.
+  description: Deprecated legacy synchronous DST release clearing coupled Math-Pack reservation.
+- name: cb_wait_front
+  signature: void cb_wait_front(uint32_t cbid, uint32_t ntiles)
+  header: tt_metal/hw/inc/api/compute/cb_api.h
+  category: cb_lifecycle
+  thread_affinity:
+  - TRISC0_UNPACK
+  - DM_BRISC
+  - DM_NCRISC
+  placement: before_unpack_or_read
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: ANY
+    postcondition_state: CB_TILES_AVAILABLE
+    must_pair_with: cb_pop_front
+  parameters:
+  - name: cbid
+    type: uint32_t
+    is_template: false
+    description: Circular buffer index (0..31)
+  - name: ntiles
+    type: uint32_t
+    is_template: false
+    description: Cumulative tile count to wait for (non-decreasing)
+  hardware_effects:
+  - Polls local L1 CB occupancy register until >= ntiles are valid
+  failure_mode: Calling on TRISC1 (MATH) or TRISC2 (PACK) is forbidden. Non-cumulative calls without pop cause desynchronization.
+  description: Blocking call waiting for producer to provide specified number of tiles in the circular buffer.
+- name: cb_pop_front
+  signature: void cb_pop_front(uint32_t cbid, uint32_t ntiles)
+  header: tt_metal/hw/inc/api/compute/cb_api.h
+  category: cb_lifecycle
+  thread_affinity:
+  - TRISC0_UNPACK
+  - DM_BRISC
+  - DM_NCRISC
+  placement: after_unpack_or_read
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CB_TILES_AVAILABLE
+    postcondition_state: ANY
+    must_pair_with: cb_wait_front
+  parameters:
+  - name: cbid
+    type: uint32_t
+    is_template: false
+    description: Circular buffer index (0..31)
+  - name: ntiles
+    type: uint32_t
+    is_template: false
+    description: Tile count to pop from front
+  hardware_effects:
+  - Advances circular buffer read pointer in L1
+  - Increments available free slot counter for producer
+  failure_mode: Popping more tiles than waited for corrupts read pointer. In dataflow, calling before noc_async_write_barrier
+    causes WAR race condition.
+  description: Frees consumed tiles from the front of circular buffer, advancing read pointer.
+- name: cb_reserve_back
+  signature: void cb_reserve_back(uint32_t cbid, uint32_t ntiles)
+  header: tt_metal/hw/inc/api/compute/cb_api.h
+  category: cb_lifecycle
+  thread_affinity:
+  - TRISC2_PACK
+  - DM_BRISC
+  - DM_NCRISC
+  placement: before_pack_or_write
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: ANY
+    postcondition_state: CB_SLOTS_RESERVED
+    must_pair_with: cb_push_back
+  parameters:
+  - name: cbid
+    type: uint32_t
+    is_template: false
+    description: Circular buffer index (0..31)
+  - name: ntiles
+    type: uint32_t
+    is_template: false
+    description: Number of free tile slots to reserve
+  hardware_effects:
+  - Polls local L1 CB occupancy register until >= ntiles free space exists
+  failure_mode: Calling on TRISC0 (UNPACK) or TRISC1 (MATH) is forbidden. Reserving more tiles than CB capacity deadlocks.
+  description: Blocking call waiting for consumer to free space in back of circular buffer.
+- name: cb_push_back
+  signature: void cb_push_back(uint32_t cbid, uint32_t ntiles)
+  header: tt_metal/hw/inc/api/compute/cb_api.h
+  category: cb_lifecycle
+  thread_affinity:
+  - TRISC2_PACK
+  - DM_BRISC
+  - DM_NCRISC
+  placement: after_pack_or_write
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CB_SLOTS_RESERVED
+    postcondition_state: ANY
+    must_pair_with: cb_reserve_back
+  parameters:
+  - name: cbid
+    type: uint32_t
+    is_template: false
+    description: Circular buffer index (0..31)
+  - name: ntiles
+    type: uint32_t
+    is_template: false
+    description: Number of tiles to commit to back
+  hardware_effects:
+  - Advances circular buffer write pointer in L1
+  - Increments available tile counter for consumer
+  failure_mode: Pushing without prior reserve or pushing before noc_async_read_barrier publishes corrupted unwritten memory.
+  description: Commits newly written tiles into circular buffer back, making them visible to consumer.
+- name: cb_pages_reservable_at_back
+  signature: bool cb_pages_reservable_at_back(int32_t operand, int32_t num_pages)
+  header: tt_metal/hw/inc/api/compute/cb_api.h
+  category: cb_lifecycle
+  thread_affinity:
+  - TRISC2_PACK
+  - DM_BRISC
+  - DM_NCRISC
+  placement: before_reserve
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: ANY
+    postcondition_state: ANY
+    must_pair_with: null
+  parameters:
+  - name: operand
+    type: int32_t
+    is_template: false
+    description: Circular buffer index
+  - name: num_pages
+    type: int32_t
+    is_template: false
+    description: Number of pages to test
+  hardware_effects:
+  - Reads local L1 circular buffer free slot status non-blockingly
+  failure_mode: None (non-blocking query).
+  description: Non-blocking query checking whether num_pages can be reserved at the back of the CB without stalling.
+- name: cb_pages_available_at_front
+  signature: bool cb_pages_available_at_front(int32_t operand, int32_t num_pages)
+  header: tt_metal/hw/inc/api/compute/cb_api.h
+  category: cb_lifecycle
+  thread_affinity:
+  - TRISC0_UNPACK
+  - DM_BRISC
+  - DM_NCRISC
+  placement: before_wait
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: ANY
+    postcondition_state: ANY
+    must_pair_with: null
+  parameters:
+  - name: operand
+    type: int32_t
+    is_template: false
+    description: Circular buffer index
+  - name: num_pages
+    type: int32_t
+    is_template: false
+    description: Number of pages to test
+  hardware_effects:
+  - Reads local L1 circular buffer valid page occupancy non-blockingly
+  failure_mode: None (non-blocking query).
+  description: Non-blocking query checking whether num_pages are available at the front of the CB without stalling.
+- name: noc_async_read
+  signature: void noc_async_read(uint64_t src_noc_addr, uint32_t dest_local_l1_addr, uint32_t size_bytes)
+  header: tt_metal/hw/inc/api/dataflow/dataflow_api.h
+  category: dataflow_noc
+  thread_affinity:
+  - DM_BRISC
+  - DM_NCRISC
+  placement: between_reserve_and_push
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CB_SLOTS_RESERVED
+    postcondition_state: NOC_READ_IN_FLIGHT
+    must_pair_with: noc_async_read_barrier
+  parameters:
+  - name: src_noc_addr
+    type: uint64_t
+    is_template: false
+    description: Source NoC byte address
+  - name: dest_local_l1_addr
+    type: uint32_t
+    is_template: false
+    description: Destination local L1 byte address
+  - name: size_bytes
+    type: uint32_t
+    is_template: false
+    description: Transfer size in bytes
+  hardware_effects:
+  - Enqueues non-blocking DMA read command on NoC hardware engine
+  - Increments outstanding NoC read transaction counter
+  failure_mode: Missing subsequent barrier before cb_push_back causes consumer to read unwritten L1 buffer.
+  description: Issues asynchronous NoC read transfer from remote core/DRAM into local L1 buffer.
+- name: noc_async_read_barrier
+  signature: void noc_async_read_barrier()
+  header: tt_metal/hw/inc/api/dataflow/dataflow_api.h
+  category: dataflow_noc
+  thread_affinity:
+  - DM_BRISC
+  - DM_NCRISC
+  placement: before_cb_push_back
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: NOC_READ_IN_FLIGHT
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: noc_async_read
+  parameters: []
+  hardware_effects:
+  - Blocks RISC execution until outstanding NoC read transaction counter reaches zero
+  failure_mode: Omitting barrier causes data race with compute consumer.
+  description: Synchronizes and guarantees completion of all in-flight asynchronous NoC read requests.
+- name: noc_async_write
+  signature: void noc_async_write(uint32_t src_local_l1_addr, uint64_t dest_noc_addr, uint32_t size_bytes)
+  header: tt_metal/hw/inc/api/dataflow/dataflow_api.h
+  category: dataflow_noc
+  thread_affinity:
+  - DM_BRISC
+  - DM_NCRISC
+  placement: between_wait_and_pop
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CB_TILES_AVAILABLE
+    postcondition_state: NOC_WRITE_IN_FLIGHT
+    must_pair_with: noc_async_write_barrier
+  parameters:
+  - name: src_local_l1_addr
+    type: uint32_t
+    is_template: false
+    description: Source local L1 byte address
+  - name: dest_noc_addr
+    type: uint64_t
+    is_template: false
+    description: Destination NoC byte address
+  - name: size_bytes
+    type: uint32_t
+    is_template: false
+    description: Transfer size in bytes
+  hardware_effects:
+  - Enqueues non-blocking DMA write command on NoC hardware engine
+  - Increments outstanding NoC write transaction counter
+  failure_mode: Calling cb_pop_front before write barrier allows producer to overwrite source L1 data mid-transfer.
+  description: Issues asynchronous NoC write transfer from local L1 buffer to remote core or DRAM.
+- name: noc_async_write_barrier
+  signature: void noc_async_write_barrier()
+  header: tt_metal/hw/inc/api/dataflow/dataflow_api.h
+  category: dataflow_noc
+  thread_affinity:
+  - DM_BRISC
+  - DM_NCRISC
+  placement: before_cb_pop_front
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: NOC_WRITE_IN_FLIGHT
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: noc_async_write
+  parameters: []
+  hardware_effects:
+  - Blocks RISC execution until outstanding NoC write transaction counter reaches zero and writes commit
+  failure_mode: Omitting barrier before pop creates Write-After-Read race condition in L1.
+  description: Synchronizes and guarantees completion of all in-flight asynchronous NoC write requests.
+- name: noc_semaphore_inc
+  signature: void noc_semaphore_inc(uint64_t dest_noc_addr, uint32_t val)
+  header: tt_metal/hw/inc/api/dataflow/dataflow_api.h
+  category: dataflow_noc
+  thread_affinity:
+  - DM_BRISC
+  - DM_NCRISC
+  placement: anywhere
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: ANY
+    postcondition_state: ANY
+    must_pair_with: null
+  parameters:
+  - name: dest_noc_addr
+    type: uint64_t
+    is_template: false
+    description: Destination NoC address of semaphore
+  - name: val
+    type: uint32_t
+    is_template: false
+    description: Increment value
+  hardware_effects:
+  - Performs atomic NoC 32-bit addition at destination semaphore address
+  failure_mode: Incorrect remote address or missing write barrier beforehand sends stale signal.
+  description: Atomically increments remote core NoC semaphore across the network-on-chip.
+- name: noc_semaphore_wait
+  signature: void noc_semaphore_wait(volatile uint32_t* sem_addr, uint32_t val)
+  header: tt_metal/hw/inc/api/dataflow/dataflow_api.h
+  category: dataflow_noc
+  thread_affinity:
+  - DM_BRISC
+  - DM_NCRISC
+  placement: before_critical_section
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: ANY
+    postcondition_state: ANY
+    must_pair_with: null
+  parameters:
+  - name: sem_addr
+    type: volatile uint32_t*
+    is_template: false
+    description: Local L1 pointer to semaphore variable
+  - name: val
+    type: uint32_t
+    is_template: false
+    description: Expected semaphore threshold value
+  hardware_effects:
+  - Spins until memory contents at sem_addr are >= val
+  failure_mode: If peer fails to increment semaphore or increments with wrong value, thread hangs indefinitely.
+  description: Blocks execution until local semaphore value is greater than or equal to target value.
+- name: noc_semaphore_set
+  signature: void noc_semaphore_set(volatile uint32_t* sem_addr, uint32_t val)
+  header: tt_metal/hw/inc/api/dataflow/dataflow_api.h
+  category: dataflow_noc
+  thread_affinity:
+  - DM_BRISC
+  - DM_NCRISC
+  placement: anywhere
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: ANY
+    postcondition_state: ANY
+    must_pair_with: null
+  parameters:
+  - name: sem_addr
+    type: volatile uint32_t*
+    is_template: false
+    description: Local L1 pointer to semaphore variable
+  - name: val
+    type: uint32_t
+    is_template: false
+    description: Value to write
+  hardware_effects:
+  - Writes 32-bit value directly into local L1 semaphore memory
+  failure_mode: Overwriting semaphore while peer is polling or before barrier causes race condition.
+  description: Initializes or resets local semaphore memory value.
+- name: reconfig_data_format
+  signature: void reconfig_data_format(uint32_t old_cb, uint32_t new_cb)
+  header: tt_metal/hw/inc/api/compute/reconfig_data_format.h
+  category: reconfig
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  placement: before_op_init
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: null
+  parameters:
+  - name: old_cb
+    type: uint32_t
+    is_template: false
+    description: Previously configured CB index
+  - name: new_cb
+    type: uint32_t
+    is_template: false
+    description: New target CB index
+  hardware_effects:
+  - Compares descriptors; if formats differ, updates unpacker format and ALU format registers
+  - Preserves existing face geometry
+  failure_mode: Passing stale old_cb bypasses needed hardware write, leaving unpacker reading wrong datum format.
+  description: Reconfigures data format and tile byte size when switching operands without changing tile geometry.
+- name: reconfig_full_operand
+  signature: void reconfig_full_operand(uint32_t old_cb, uint32_t new_cb)
+  header: tt_metal/hw/inc/api/compute/reconfig_data_format.h
+  category: reconfig
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  placement: before_op_init
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: null
+  parameters:
+  - name: old_cb
+    type: uint32_t
+    is_template: false
+    description: Previously configured CB index
+  - name: new_cb
+    type: uint32_t
+    is_template: false
+    description: New target CB index
+  hardware_effects:
+  - Reconfigures data format, tile byte size, tile height/width, and face geometry in unpacker
+  failure_mode: Failing to use full reconfig when face geometry differs causes unpacker face striding corruption.
+  description: Comprehensive reconfiguration updating data format, byte size, and full tile/face geometry.
+- name: reconfig_tile_shape
+  signature: void reconfig_tile_shape(uint32_t old_cb, uint32_t new_cb)
+  header: tt_metal/hw/inc/api/compute/reconfig_data_format.h
+  category: reconfig
+  thread_affinity:
+  - TRISC0_UNPACK
+  placement: before_op_init
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: null
+  parameters:
+  - name: old_cb
+    type: uint32_t
+    is_template: false
+    description: Previously configured CB index
+  - name: new_cb
+    type: uint32_t
+    is_template: false
+    description: New target CB index
+  hardware_effects:
+  - Updates unpacker tile dimensions and face geometry without modifying ALU format specification registers
+  failure_mode: Calling when data formats also differ corrupts unpack data representation.
+  description: Lightweight reconfiguration updating only tile dimensions and face counts in the Unpack pipeline.
+- name: pack_reconfig_data_format
+  signature: template <bool is_tile_dim_reconfig_en = false> void pack_reconfig_data_format(uint32_t old_ocb, uint32_t new_ocb)
+  header: tt_metal/hw/inc/api/compute/reconfig_data_format.h
+  category: reconfig
+  thread_affinity:
+  - TRISC2_PACK
+  placement: before_pack_tile
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: null
+  parameters:
+  - name: is_tile_dim_reconfig_en
+    type: bool
+    is_template: true
+    description: Whether to also reconfigure packer tile dimensions
+  - name: old_ocb
+    type: uint32_t
+    is_template: false
+    description: Old output circular buffer index
+  - name: new_ocb
+    type: uint32_t
+    is_template: false
+    description: New output circular buffer index
+  hardware_effects:
+  - Updates packer output data format registers and quantization settings
+  failure_mode: Omitting pack reconfig when switching output formats packs tiles using wrong bitwidth and exponent scheme.
+  description: Reconfigures Packer data format and quantization parameters for new output circular buffer.
+- name: matmul_init
+  signature: void matmul_init(uint32_t in0_cb, uint32_t in1_cb, uint32_t transpose = 0)
+  header: tt_metal/hw/inc/api/compute/matmul.h
+  category: matmul
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  placement: before_matmul_tiles
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: null
+  parameters:
+  - name: in0_cb
+    type: uint32_t
+    is_template: false
+    description: First input CB (activation, maps to SrcB)
+  - name: in1_cb
+    type: uint32_t
+    is_template: false
+    description: Second input CB (weights, maps to SrcA)
+  - name: transpose
+    type: uint32_t
+    is_template: false
+    description: Transpose flag for B matrix
+  hardware_effects:
+  - Configures unpacker AB matmul mode (llk_unpack_AB_matmul_init)
+  - Configures FPU matmul engine (llk_math_matmul_init)
+  - Sets Sentinel state with reversed operands (in1->SrcA, in0->SrcB)
+  failure_mode: Failing to call compute_kernel_hw_startup with SrcOrder::Reverse prior to matmul causes operand inversion.
+  description: Short init configuring Unpack and Math pipelines for tile-by-tile matrix multiplication.
+- name: matmul_init_short
+  signature: void matmul_init_short(uint32_t in0_cb, uint32_t in1_cb, uint32_t transpose = 0)
+  header: tt_metal/hw/inc/api/compute/matmul.h
+  category: matmul
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  placement: before_matmul_tiles
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: null
+  parameters:
+  - name: in0_cb
+    type: uint32_t
+    is_template: false
+    description: First input CB index
+  - name: in1_cb
+    type: uint32_t
+    is_template: false
+    description: Second input CB index
+  - name: transpose
+    type: uint32_t
+    is_template: false
+    description: Transpose flag
+  hardware_effects:
+  - Re-arms MOPs for matmul without rewriting baseline configuration registers
+  failure_mode: Calling before matmul_init or compute_kernel_hw_startup leaves hardware execution units uninitialized.
+  description: Fast minimal init restoring matmul MOP configuration when data formats are unchanged.
+- name: matmul_block_init
+  signature: void matmul_block_init(uint32_t in0_cb, uint32_t in1_cb, uint32_t transpose, uint32_t ct_dim, uint32_t rt_dim,
+    uint32_t kt_dim)
+  header: tt_metal/hw/inc/api/compute/matmul.h
+  category: matmul
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  placement: before_matmul_block
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: null
+  parameters:
+  - name: in0_cb
+    type: uint32_t
+    is_template: false
+    description: Activation input CB index
+  - name: in1_cb
+    type: uint32_t
+    is_template: false
+    description: Weight input CB index
+  - name: transpose
+    type: uint32_t
+    is_template: false
+    description: Transpose flag
+  - name: ct_dim
+    type: uint32_t
+    is_template: false
+    description: Block column dimension in tiles
+  - name: rt_dim
+    type: uint32_t
+    is_template: false
+    description: Block row dimension in tiles
+  - name: kt_dim
+    type: uint32_t
+    is_template: false
+    description: Inner reduction dimension in tiles
+  hardware_effects:
+  - Programs block-level MOP sequences and unrolls for outer product matmul loops
+  failure_mode: Block tile count (ct_dim * rt_dim) exceeding DST capacity causes out-of-bounds register overwrite.
+  description: Initializes block-level matrix multiplication with specified tile dimensionalities.
+- name: matmul_tiles
+  signature: void matmul_tiles(uint32_t in0_cb, uint32_t in1_cb, uint32_t in0_tile, uint32_t in1_tile, uint32_t idst)
+  header: tt_metal/hw/inc/api/compute/matmul.h
+  category: matmul
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  placement: between_acquire_commit
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: null
+  parameters:
+  - name: in0_cb
+    type: uint32_t
+    is_template: false
+    description: Input CB 0 index
+  - name: in1_cb
+    type: uint32_t
+    is_template: false
+    description: Input CB 1 index
+  - name: in0_tile
+    type: uint32_t
+    is_template: false
+    description: Tile index in input CB 0
+  - name: in1_tile
+    type: uint32_t
+    is_template: false
+    description: Tile index in input CB 1
+  - name: idst
+    type: uint32_t
+    is_template: false
+    description: Destination register slot index
+  hardware_effects:
+  - 'UNPACK: reads in0_tile into SrcB and in1_tile into SrcA'
+  - 'MATH: executes FPU matrix multiply-accumulate into DST[idst]'
+  failure_mode: idst exceeding DST capacity overwrites opposite ping-pong half, corrupting packer output.
+  description: Multiplies tile A by tile B and accumulates product into DST register slot idst.
+- name: matmul_block
+  signature: void matmul_block(uint32_t in0_cb, uint32_t in1_cb, uint32_t in0_tile_offset, uint32_t in1_tile_offset, uint32_t
+    idst, uint32_t transpose, uint32_t ct_dim, uint32_t rt_dim, uint32_t kt_dim)
+  header: tt_metal/hw/inc/api/compute/matmul.h
+  category: matmul
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  placement: between_acquire_commit
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: null
+  parameters:
+  - name: in0_cb
+    type: uint32_t
+    is_template: false
+    description: Activation CB index
+  - name: in1_cb
+    type: uint32_t
+    is_template: false
+    description: Weight CB index
+  - name: in0_tile_offset
+    type: uint32_t
+    is_template: false
+    description: Starting tile index in CB 0
+  - name: in1_tile_offset
+    type: uint32_t
+    is_template: false
+    description: Starting tile index in CB 1
+  - name: idst
+    type: uint32_t
+    is_template: false
+    description: Base destination register index
+  - name: transpose
+    type: uint32_t
+    is_template: false
+    description: Transpose flag
+  - name: ct_dim
+    type: uint32_t
+    is_template: false
+    description: Column dimension
+  - name: rt_dim
+    type: uint32_t
+    is_template: false
+    description: Row dimension
+  - name: kt_dim
+    type: uint32_t
+    is_template: false
+    description: Reduction dimension
+  hardware_effects:
+  - Executes outer product loop multiplying block of tiles into DST array
+  failure_mode: Missing tile_regs_acquire or out-of-bounds idst + (rt_dim*ct_dim) corrupts destination memory.
+  description: Multiplies a 2D block of activation tiles by weight tiles, accumulating in DST.
+- name: mm_uninit
+  signature: void mm_uninit(uint32_t in0_cb, uint32_t in1_cb)
+  header: tt_metal/hw/inc/api/compute/matmul.h
+  category: matmul
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  placement: after_matmul
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: matmul_init
+  parameters:
+  - name: in0_cb
+    type: uint32_t
+    is_template: false
+    description: First input CB index
+  - name: in1_cb
+    type: uint32_t
+    is_template: false
+    description: Second input CB index
+  hardware_effects:
+  - 'Quasar: Reverts MxFp4 unpacker OUT_DATA_FORMAT and ALU format back to canonical unpack_dst_format table'
+  failure_mode: On Quasar, subsequent non-matmul ops unpack buffer as 2x-packed format, resulting in corrupted output.
+  description: Reverts specialized matmul unpack/format overrides back to canonical configuration.
+- name: add_init
+  signature: void add_init(uint32_t icb0, uint32_t icb1, bool acc_to_dest = false)
+  header: tt_metal/hw/inc/api/compute/eltwise_binary.h
+  category: binary_eltwise
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  placement: before_add_tiles
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: null
+  parameters:
+  - name: icb0
+    type: uint32_t
+    is_template: false
+    description: Input CB 0 (SrcA)
+  - name: icb1
+    type: uint32_t
+    is_template: false
+    description: Input CB 1 (SrcB)
+  - name: acc_to_dest
+    type: bool
+    is_template: false
+    description: Whether to accumulate result directly to existing DST contents
+  hardware_effects:
+  - 'UNPACK: llk_unpack_AB_init<BroadcastType::NONE>(icb0, icb1)'
+  - 'MATH: llk_math_eltwise_binary_init<ELWADD, NONE>(acc_to_dest)'
+  failure_mode: Calling after matmul without compute_kernel_hw_startup<SrcOrder::Regular> inverts operand sources.
+  description: Initializes Unpack and Math pipelines for element-wise tile addition.
+- name: add_tiles
+  signature: void add_tiles(uint32_t icb0, uint32_t icb1, uint32_t itile0, uint32_t itile1, uint32_t idst)
+  header: tt_metal/hw/inc/api/compute/eltwise_binary.h
+  category: binary_eltwise
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  placement: between_acquire_commit
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: null
+  parameters:
+  - name: icb0
+    type: uint32_t
+    is_template: false
+    description: Input CB 0 index
+  - name: icb1
+    type: uint32_t
+    is_template: false
+    description: Input CB 1 index
+  - name: itile0
+    type: uint32_t
+    is_template: false
+    description: Tile index in CB 0
+  - name: itile1
+    type: uint32_t
+    is_template: false
+    description: Tile index in CB 1
+  - name: idst
+    type: uint32_t
+    is_template: false
+    description: Destination register slot index
+  hardware_effects:
+  - 'UNPACK: reads itile0 to SrcA and itile1 to SrcB'
+  - 'MATH: executes elementwise addition writing to DST[idst]'
+  failure_mode: Calling while MATH does not hold DST leads to out-of-order writes or hardware hang.
+  description: Performs element-wise addition of two tiles and writes result into DST register slot idst.
+- name: sub_init
+  signature: void sub_init(uint32_t icb0, uint32_t icb1, bool acc_to_dest = false)
+  header: tt_metal/hw/inc/api/compute/eltwise_binary.h
+  category: binary_eltwise
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  placement: before_sub_tiles
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: null
+  parameters:
+  - name: icb0
+    type: uint32_t
+    is_template: false
+    description: Minuend input CB (SrcA)
+  - name: icb1
+    type: uint32_t
+    is_template: false
+    description: Subtrahend input CB (SrcB)
+  - name: acc_to_dest
+    type: bool
+    is_template: false
+    description: Accumulate to destination flag
+  hardware_effects:
+  - 'UNPACK: llk_unpack_AB_init<BroadcastType::NONE>(icb0, icb1)'
+  - 'MATH: llk_math_eltwise_binary_init<ELWSUB, NONE>(acc_to_dest)'
+  failure_mode: Swapped operands invert sign of subtraction result.
+  description: Initializes Unpack and Math pipelines for element-wise tile subtraction.
+- name: sub_tiles
+  signature: void sub_tiles(uint32_t icb0, uint32_t icb1, uint32_t itile0, uint32_t itile1, uint32_t idst)
+  header: tt_metal/hw/inc/api/compute/eltwise_binary.h
+  category: binary_eltwise
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  placement: between_acquire_commit
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: null
+  parameters:
+  - name: icb0
+    type: uint32_t
+    is_template: false
+    description: Minuend CB index
+  - name: icb1
+    type: uint32_t
+    is_template: false
+    description: Subtrahend CB index
+  - name: itile0
+    type: uint32_t
+    is_template: false
+    description: Minuend tile index
+  - name: itile1
+    type: uint32_t
+    is_template: false
+    description: Subtrahend tile index
+  - name: idst
+    type: uint32_t
+    is_template: false
+    description: Destination register slot index
+  hardware_effects:
+  - 'UNPACK: reads itile0 to SrcA and itile1 to SrcB'
+  - 'MATH: executes elementwise subtraction writing to DST[idst]'
+  failure_mode: Calling without holding DST lock corrupts destination memory.
+  description: Performs element-wise subtraction of two tiles and writes result into DST register slot idst.
+- name: mul_init
+  signature: void mul_init(uint32_t icb0, uint32_t icb1, bool acc_to_dest = false)
+  header: tt_metal/hw/inc/api/compute/eltwise_binary.h
+  category: binary_eltwise
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  placement: before_mul_tiles
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: null
+  parameters:
+  - name: icb0
+    type: uint32_t
+    is_template: false
+    description: Factor 0 input CB
+  - name: icb1
+    type: uint32_t
+    is_template: false
+    description: Factor 1 input CB
+  - name: acc_to_dest
+    type: bool
+    is_template: false
+    description: Accumulate to destination flag
+  hardware_effects:
+  - 'UNPACK: llk_unpack_AB_init<BroadcastType::NONE>(icb0, icb1)'
+  - 'MATH: llk_math_eltwise_binary_init<ELWMUL, NONE>(acc_to_dest)'
+  failure_mode: Missing mul_init leaves ALU in previous mode (e.g. Add), resulting in addition instead of multiplication.
+  description: Initializes Unpack and Math pipelines for element-wise tile multiplication.
+- name: mul_tiles
+  signature: void mul_tiles(uint32_t icb0, uint32_t icb1, uint32_t itile0, uint32_t itile1, uint32_t idst)
+  header: tt_metal/hw/inc/api/compute/eltwise_binary.h
+  category: binary_eltwise
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  placement: between_acquire_commit
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: null
+  parameters:
+  - name: icb0
+    type: uint32_t
+    is_template: false
+    description: Factor 0 CB index
+  - name: icb1
+    type: uint32_t
+    is_template: false
+    description: Factor 1 CB index
+  - name: itile0
+    type: uint32_t
+    is_template: false
+    description: Factor 0 tile index
+  - name: itile1
+    type: uint32_t
+    is_template: false
+    description: Factor 1 tile index
+  - name: idst
+    type: uint32_t
+    is_template: false
+    description: Destination register slot index
+  hardware_effects:
+  - 'UNPACK: reads itile0 to SrcA and itile1 to SrcB'
+  - 'MATH: executes elementwise multiplication according to MATH_FIDELITY into DST[idst]'
+  failure_mode: Calling without holding DST lock corrupts destination memory.
+  description: Performs element-wise multiplication of two tiles and writes result into DST register slot idst.
+- name: add_reuse_dest_init
+  signature: template <BinaryOpReuseDest reuse_dest> void add_reuse_dest_init(uint32_t icb)
+  header: tt_metal/hw/inc/api/compute/eltwise_binary.h
+  category: binary_eltwise
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  placement: before_add_reuse_dest_tiles
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: null
+  parameters:
+  - name: reuse_dest
+    type: BinaryOpReuseDest
+    is_template: true
+    description: Operand slot mapped to existing DST register contents
+  - name: icb
+    type: uint32_t
+    is_template: false
+    description: Input CB index for fresh operand
+  hardware_effects:
+  - 'UNPACK: llk_unpack_A_init (unpacks only one operand to save CB bandwidth)'
+  - 'MATH: llk_math_eltwise_binary_init<ELWADD, reuse_dest>'
+  failure_mode: Executing when target DST slot contains uninitialized data computes on garbage.
+  description: Initializes elementwise addition where one operand is reused directly from the destination register.
+- name: add_reuse_dest_tiles
+  signature: template <BinaryOpReuseDest reuse_dest> void add_reuse_dest_tiles(uint32_t icb, uint32_t itile, uint32_t idst)
+  header: tt_metal/hw/inc/api/compute/eltwise_binary.h
+  category: binary_eltwise
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  placement: between_acquire_commit
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: null
+  parameters:
+  - name: reuse_dest
+    type: BinaryOpReuseDest
+    is_template: true
+    description: Operand reuse mode
+  - name: icb
+    type: uint32_t
+    is_template: false
+    description: Input CB index
+  - name: itile
+    type: uint32_t
+    is_template: false
+    description: Tile index in input CB
+  - name: idst
+    type: uint32_t
+    is_template: false
+    description: Destination register index to read and update
+  hardware_effects:
+  - 'UNPACK: unrolls itile into SrcA or SrcB'
+  - 'MATH: adds fresh tile with existing DST[idst] in-place'
+  failure_mode: Calling without holding DST lock corrupts destination memory.
+  description: Adds input tile to existing tile residing in DST[idst], updating it in-place.
+- name: add_bcast_rows_init
+  signature: void add_bcast_rows_init(uint32_t icb0, uint32_t icb1, uint32_t ocb)
+  header: tt_metal/hw/inc/api/compute/bcast.h
+  category: bcast_eltwise
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  placement: before_bcast_tiles
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: null
+  parameters:
+  - name: icb0
+    type: uint32_t
+    is_template: false
+    description: Full matrix CB (SrcA)
+  - name: icb1
+    type: uint32_t
+    is_template: false
+    description: 1x32 row broadcast vector CB (SrcB)
+  - name: ocb
+    type: uint32_t
+    is_template: false
+    description: Output CB
+  hardware_effects:
+  - 'UNPACK: arms row broadcast address generators in unpacker'
+  - 'MATH: configures ALU for ELWADD with BroadcastType::ROW'
+  failure_mode: Broadcast dimension mismatch with input CB tile dimensions hangs unpacker or corrupts broadcast lines.
+  description: Initializes unpacker and ALU to broadcast 1D row vector across all rows of full 2D matrix during addition.
+- name: add_bcast_cols_init
+  signature: void add_bcast_cols_init(uint32_t icb0, uint32_t icb1, uint32_t ocb)
+  header: tt_metal/hw/inc/api/compute/bcast.h
+  category: bcast_eltwise
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  placement: before_bcast_tiles
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: null
+  parameters:
+  - name: icb0
+    type: uint32_t
+    is_template: false
+    description: Full matrix CB (SrcA)
+  - name: icb1
+    type: uint32_t
+    is_template: false
+    description: 32x1 column broadcast vector CB (SrcB)
+  - name: ocb
+    type: uint32_t
+    is_template: false
+    description: Output CB
+  hardware_effects:
+  - 'UNPACK: arms column broadcast address generators in unpacker'
+  - 'MATH: configures ALU for ELWADD with BroadcastType::COL'
+  failure_mode: Broadcast dimension mismatch with input CB tile dimensions corrupts column replication.
+  description: Initializes unpacker and ALU to broadcast 1D column vector across all columns of full 2D matrix during addition.
+- name: bcast_tiles
+  signature: template <BroadcastType bcast_type> void bcast_tiles(uint32_t icb0, uint32_t icb1, uint32_t itile0, uint32_t
+    itile1, uint32_t idst)
+  header: tt_metal/hw/inc/api/compute/bcast.h
+  category: bcast_eltwise
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  placement: between_acquire_commit
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: null
+  parameters:
+  - name: bcast_type
+    type: BroadcastType
+    is_template: true
+    description: 'Broadcast mode: ROW, COL, or SCALAR'
+  - name: icb0
+    type: uint32_t
+    is_template: false
+    description: Full matrix CB
+  - name: icb1
+    type: uint32_t
+    is_template: false
+    description: Broadcast operand CB
+  - name: itile0
+    type: uint32_t
+    is_template: false
+    description: Full tile index
+  - name: itile1
+    type: uint32_t
+    is_template: false
+    description: Broadcast tile index
+  - name: idst
+    type: uint32_t
+    is_template: false
+    description: Destination register slot index
+  hardware_effects:
+  - 'UNPACK: broadcasts itile1 along row/col into SrcB, reads itile0 into SrcA'
+  - 'MATH: computes elementwise binary operation into DST[idst]'
+  failure_mode: Calling while MATH does not hold DST leads to corrupted destination output.
+  description: Executes broadcast binary operation between full matrix tile and broadcast tile.
+- name: unary_bcast_init
+  signature: template <BroadcastType bcast_type> void unary_bcast_init(uint32_t icb)
+  header: tt_metal/hw/inc/api/compute/bcast.h
+  category: bcast_eltwise
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  placement: before_unary_bcast
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: IN_UNARY_BCAST_MODE
+    must_pair_with: unary_bcast_uninit
+  parameters:
+  - name: bcast_type
+    type: BroadcastType
+    is_template: true
+    description: 'Broadcast dimension: ROW, COL, or SCALAR'
+  - name: icb
+    type: uint32_t
+    is_template: false
+    description: Input CB containing vector to broadcast
+  hardware_effects:
+  - 'UNPACK: arms unpacker broadcast unit to broadcast lines/faces into SrcB'
+  - 'MATH: configures ALU for B2D datacopy'
+  failure_mode: Failing to pair with unary_bcast_uninit leaves unpacker in broadcast mode, hanging future unpacks.
+  description: Initializes execution units for broadcasting a single vector to fill an entire 2D tile.
+- name: unary_bcast_uninit
+  signature: template <BroadcastType bcast_type> void unary_bcast_uninit(uint32_t icb)
+  header: tt_metal/hw/inc/api/compute/bcast.h
+  category: bcast_eltwise
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  placement: after_unary_bcast
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: IN_UNARY_BCAST_MODE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: unary_bcast_init
+  parameters:
+  - name: bcast_type
+    type: BroadcastType
+    is_template: true
+    description: Broadcast mode matching init
+  - name: icb
+    type: uint32_t
+    is_template: false
+    description: Input CB index
+  hardware_effects:
+  - 'UNPACK: llk_unpack_A_uninit<bcast_type>()'
+  - 'MATH: llk_math_eltwise_unary_datacopy_uninit<bcast_type>()'
+  failure_mode: Missing uninit pollutes next kernel or causes unpack token deadlock.
+  description: Exits unary broadcast mode, restoring canonical unpacker and math state.
+- name: reduce_init
+  signature: template <PoolType reduce_type, ReduceDim reduce_dim, bool is_fp32_dest_acc_en = DST_ACCUM_MODE> void reduce_init(uint32_t
+    icb, uint32_t icb_scaler, uint32_t ocb)
+  header: tt_metal/hw/inc/api/compute/reduce.h
+  category: reduce
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  - TRISC2_PACK
+  placement: before_reduce_tile
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: IN_REDUCE_MODE
+    must_pair_with: reduce_uninit
+  parameters:
+  - name: reduce_type
+    type: PoolType
+    is_template: true
+    description: 'Reduction operation: SUM, AVG, or MAX'
+  - name: reduce_dim
+    type: ReduceDim
+    is_template: true
+    description: 'Reduction dimension: REDUCE_ROW, REDUCE_COL, or REDUCE_SCALAR'
+  - name: icb
+    type: uint32_t
+    is_template: false
+    description: Input data circular buffer
+  - name: icb_scaler
+    type: uint32_t
+    is_template: false
+    description: Scaling factor circular buffer
+  - name: ocb
+    type: uint32_t
+    is_template: false
+    description: Output circular buffer
+  hardware_effects:
+  - 'UNPACK: Programs reduce unpacker modes (llk_unpack_AB_reduce_init)'
+  - 'MATH: Initializes reduction ALU engine (llk_math_reduce_init)'
+  - 'PACK: Arm reduce edge masks (_llk_pack_reduce_mask_config_) to zero non-reduction coordinates'
+  failure_mode: Failing to call reduce_uninit leaves packer edge masks active, causing subsequent pack_tile calls to zero
+    out valid data.
+  description: Initializes hardware for dimension reduction operations across rows, columns, or entire tiles.
+- name: reduce_tile
+  signature: template <PoolType reduce_type, ReduceDim reduce_dim, bool is_fp32_dest_acc_en = DST_ACCUM_MODE> void reduce_tile(uint32_t
+    icb, uint32_t iscaler, uint32_t itile, uint32_t iscaler_tile, uint32_t idst)
+  header: tt_metal/hw/inc/api/compute/reduce.h
+  category: reduce
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  placement: between_acquire_commit
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: null
+  parameters:
+  - name: reduce_type
+    type: PoolType
+    is_template: true
+    description: Reduction type
+  - name: reduce_dim
+    type: ReduceDim
+    is_template: true
+    description: Reduction dimension
+  - name: icb
+    type: uint32_t
+    is_template: false
+    description: Data CB index
+  - name: iscaler
+    type: uint32_t
+    is_template: false
+    description: Scaler CB index
+  - name: itile
+    type: uint32_t
+    is_template: false
+    description: Data tile index
+  - name: iscaler_tile
+    type: uint32_t
+    is_template: false
+    description: Scaler tile index
+  - name: idst
+    type: uint32_t
+    is_template: false
+    description: Destination register slot index
+  hardware_effects:
+  - 'UNPACK: unrolls itile and iscaler_tile'
+  - 'MATH: executes reduction operation along chosen dimension into DST[idst]'
+  failure_mode: Calling without prior reduce_init or without holding DST corrupts ALU state.
+  description: Executes reduction operation on single tile along row, column, or scalar dimension.
+- name: reduce_uninit
+  signature: void reduce_uninit(uint32_t icb = 0)
+  header: tt_metal/hw/inc/api/compute/reduce.h
+  category: reduce
+  thread_affinity:
+  - TRISC1_MATH
+  - TRISC2_PACK
+  - TRISC0_UNPACK
+  placement: after_reduce_tile
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: IN_REDUCE_MODE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: reduce_init
+  parameters:
+  - name: icb
+    type: uint32_t
+    is_template: false
+    description: Input CB index used during reduce
+  hardware_effects:
+  - 'PACK: Clears packer edge masks via llk_pack_reduce_mask_clear()'
+  - 'MATH: Resets math reduce state via llk_math_reduce_uninit(icb)'
+  - 'UNPACK: On Quasar, reverts MxFp4 unpack format override'
+  failure_mode: Missing reduce_uninit zeroes out subsequent tile packing results, silently corrupting model accuracy.
+  description: Clears packer reduce edge masks and restores canonical packing and math state.
+- name: reduce_revert_delta
+  signature: void reduce_revert_delta(uint32_t ocb)
+  header: tt_metal/hw/inc/api/compute/reduce.h
+  category: reduce
+  thread_affinity:
+  - TRISC2_PACK
+  placement: after_reduce_pack
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: IN_REDUCE_MODE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: reduce_init_delta
+  parameters:
+  - name: ocb
+    type: uint32_t
+    is_template: false
+    description: Output CB index
+  hardware_effects:
+  - Restores delta-reduction packer strides and clears edge masking registers
+  failure_mode: Missing revert causes next pack_tile to write with delta offset strides, corrupting output buffer.
+  description: Reverts delta-reduction packer configuration back to canonical packing mode.
+- name: tilize_init
+  signature: template <bool is_fp32_dest_acc_en = DST_ACCUM_MODE> void tilize_init(uint32_t icb, uint32_t block, uint32_t
+    ocb)
+  header: tt_metal/hw/inc/api/compute/tilize.h
+  category: tilize
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  - TRISC2_PACK
+  placement: before_tilize_block
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: IN_TILIZE_MODE
+    must_pair_with: tilize_uninit
+  parameters:
+  - name: icb
+    type: uint32_t
+    is_template: false
+    description: Input circular buffer containing untilized row-major data
+  - name: block
+    type: uint32_t
+    is_template: false
+    description: Block size in tiles
+  - name: ocb
+    type: uint32_t
+    is_template: false
+    description: Output circular buffer receiving tiled output
+  hardware_effects:
+  - 'UNPACK: Programs row-by-row unpacking strides and tile descriptor'
+  - 'PACK: On Blackhole, switches packer mode from Default to PackMode::Tilize'
+  failure_mode: Failing to pair with tilize_uninit leaves packer in PackMode::Tilize, breaking subsequent standard pack_tile
+    calls.
+  description: Configures execution units for converting row-major 1D buffer data into 2D tiled layout.
+- name: tilize_block
+  signature: template <bool is_fp32_dest_acc_en = DST_ACCUM_MODE> void tilize_block(uint32_t icb, uint32_t block, uint32_t
+    ocb)
+  header: tt_metal/hw/inc/api/compute/tilize.h
+  category: tilize
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  - TRISC2_PACK
+  placement: between_acquire_commit
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: IN_TILIZE_MODE
+    postcondition_state: IN_TILIZE_MODE
+    must_pair_with: null
+  parameters:
+  - name: icb
+    type: uint32_t
+    is_template: false
+    description: Input linear CB
+  - name: block
+    type: uint32_t
+    is_template: false
+    description: Number of tiles in block
+  - name: ocb
+    type: uint32_t
+    is_template: false
+    description: Output tiled CB
+  hardware_effects:
+  - 'Executes complete tilize loop: unrolls row datums, passes through math, and packs as 32x32 tiles'
+  failure_mode: Block size exceeding DST capacity causes out-of-bounds corruption.
+  description: Tilizes a block of row-major data from input CB into tiled format in output CB.
+- name: tilize_uninit
+  signature: void tilize_uninit(uint32_t icb, uint32_t ocb)
+  header: tt_metal/hw/inc/api/compute/tilize.h
+  category: tilize
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC2_PACK
+  placement: after_tilize_block
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: IN_TILIZE_MODE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: tilize_init
+  parameters:
+  - name: icb
+    type: uint32_t
+    is_template: false
+    description: Input CB index used during tilize
+  - name: ocb
+    type: uint32_t
+    is_template: false
+    description: Output CB index used during tilize
+  hardware_effects:
+  - 'UNPACK: llk_unpack_tilize_uninit restores canonical Y stride and unpack descriptor'
+  - 'PACK: On Blackhole, re-arms packer in PackMode::Default via llk_pack_init<PackMode::Default>(ocb)'
+  failure_mode: Missing uninit pollutes next kernel on same core with tilize unpack/pack strides.
+  description: Exits tilize mode, restoring canonical unpack tile descriptors and default packer mode.
+- name: untilize_init
+  signature: void untilize_init(uint32_t icb)
+  header: tt_metal/hw/inc/api/compute/untilize.h
+  category: untilize
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  placement: before_untilize_block
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: IN_UNTILIZE_MODE
+    must_pair_with: untilize_uninit
+  parameters:
+  - name: icb
+    type: uint32_t
+    is_template: false
+    description: Input tiled CB index
+  hardware_effects:
+  - 'UNPACK: arms untilize unpacking MOP and stride registers to unpack tiled data in row-major order'
+  failure_mode: Failing to call untilize_uninit leaves unpacker flattening tiles, corrupting subsequent 2D tile unpacks.
+  description: Initializes unpacker for flattening 2D tiles into 1D row-major layout.
+- name: untilize_block
+  signature: void untilize_block(uint32_t icb, uint32_t block, uint32_t ocb)
+  header: tt_metal/hw/inc/api/compute/untilize.h
+  category: untilize
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  placement: between_acquire_commit
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: IN_UNTILIZE_MODE
+    postcondition_state: IN_UNTILIZE_MODE
+    must_pair_with: null
+  parameters:
+  - name: icb
+    type: uint32_t
+    is_template: false
+    description: Input tiled CB
+  - name: block
+    type: uint32_t
+    is_template: false
+    description: Block size in tiles
+  - name: ocb
+    type: uint32_t
+    is_template: false
+    description: Output row-major CB
+  hardware_effects:
+  - Unpacks tiles and writes flattened rows into DST
+  failure_mode: Calling while holding DST incorrectly or block overflow corrupts destination memory.
+  description: Untilizes a block of 2D tiles into row-major order.
+- name: untilize_uninit
+  signature: void untilize_uninit(uint32_t icb)
+  header: tt_metal/hw/inc/api/compute/untilize.h
+  category: untilize
+  thread_affinity:
+  - TRISC0_UNPACK
+  placement: after_untilize_block
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: IN_UNTILIZE_MODE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: untilize_init
+  parameters:
+  - name: icb
+    type: uint32_t
+    is_template: false
+    description: Input CB index
+  hardware_effects:
+  - Restores canonical tile unpacker MOPs and counter strides
+  failure_mode: Subsequent operations continue unpacking flattened rows into SrcA, destroying 2D face structure.
+  description: Exits untilize unpack mode, restoring canonical 2D tile unpack state.
+- name: pack_untilize_init
+  signature: template <uint32_t block_ct_dim = 8, uint32_t full_ct_dim = block_ct_dim, bool narrow_row = false, std::uint32_t
+    row_num_datums = TILE_C_DIM, bool dense = false> void pack_untilize_init(uint32_t icb, uint32_t ocb)
+  header: tt_metal/hw/inc/api/compute/pack_untilize.h
+  category: untilize
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  - TRISC2_PACK
+  placement: before_pack_untilize_block
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: IN_UNTILIZE_MODE
+    must_pair_with: pack_untilize_uninit
+  parameters:
+  - name: block_ct_dim
+    type: uint32_t
+    is_template: true
+    description: Block width in tiles
+  - name: full_ct_dim
+    type: uint32_t
+    is_template: true
+    description: Full row width in tiles (must be divisible by block_ct_dim)
+  - name: icb
+    type: uint32_t
+    is_template: false
+    description: Input circular buffer
+  - name: ocb
+    type: uint32_t
+    is_template: false
+    description: Output circular buffer receiving untilized row-major data
+  hardware_effects:
+  - 'PACK: Overwrites packer destination offset registers and arms untilize row-major pack strides'
+  failure_mode: Failing to call pack_untilize_uninit causes subsequent pack_tile calls to write linear rows instead of tiles.
+  description: Initializes unpack, math, and pack pipelines for untilizing tiled blocks to linear memory.
+- name: pack_untilize_block
+  signature: template <uint32_t block_ct_dim = 8> void pack_untilize_block(uint32_t icb, uint32_t block_rt_dim, uint32_t ocb)
+  header: tt_metal/hw/inc/api/compute/pack_untilize.h
+  category: untilize
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  - TRISC2_PACK
+  placement: between_wait_release
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: IN_UNTILIZE_MODE
+    postcondition_state: IN_UNTILIZE_MODE
+    must_pair_with: null
+  parameters:
+  - name: block_ct_dim
+    type: uint32_t
+    is_template: true
+    description: Block column dimension
+  - name: icb
+    type: uint32_t
+    is_template: false
+    description: Input CB
+  - name: block_rt_dim
+    type: uint32_t
+    is_template: false
+    description: Block row dimension
+  - name: ocb
+    type: uint32_t
+    is_template: false
+    description: Output CB
+  hardware_effects:
+  - Reads tiled data from DST, formats into linear row-major order, and writes to output CB
+  failure_mode: Calling while packer does not hold DST corrupts output data.
+  description: Packs a block of tiles from destination registers into row-major linear format.
+- name: pack_untilize_uninit
+  signature: template <bool is_fp32_dest_acc_en = DST_ACCUM_MODE> void pack_untilize_uninit(uint32_t ocb)
+  header: tt_metal/hw/inc/api/compute/pack_untilize.h
+  category: untilize
+  thread_affinity:
+  - TRISC2_PACK
+  placement: after_pack_untilize
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: IN_UNTILIZE_MODE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: pack_untilize_init
+  parameters:
+  - name: ocb
+    type: uint32_t
+    is_template: false
+    description: Output CB index
+  hardware_effects:
+  - llk_init_packer_dest_offset_registers<PackMode::Default>(ocb)
+  - llk_pack_reconfig_data_format<is_fp32_dest_acc_en>(ocb)
+  - llk_pack_init(ocb)
+  failure_mode: Missing uninit leaves packer reading row strides from DST, corrupting all future tile packing.
+  description: Restores packer destination offset registers and re-arms default tile packing mode.
+- name: pack_tile
+  signature: template <bool is_fp32_dest_acc_en = DST_ACCUM_MODE> void pack_tile(uint32_t idst, uint32_t ocb)
+  header: tt_metal/hw/inc/api/compute/pack.h
+  category: pack
+  thread_affinity:
+  - TRISC2_PACK
+  placement: between_wait_release
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: PACK_DST_HELD
+    postcondition_state: PACK_DST_HELD
+    must_pair_with: null
+  parameters:
+  - name: idst
+    type: uint32_t
+    is_template: false
+    description: Destination register tile index to pack
+  - name: ocb
+    type: uint32_t
+    is_template: false
+    description: Output circular buffer index
+  hardware_effects:
+  - 'PACK: reads tile from DST[idst], quantizes/formats data, writes to L1 CB write pointer offset'
+  failure_mode: Calling while packer does not hold DST lock reads uncommitted garbage data. Calling in reduce mode zeroes
+    non-reduced datums.
+  description: Reads tile from destination register, formats it, and packs it into the output circular buffer.
+- name: pack_rows_to_addr_init
+  signature: void pack_rows_to_addr_init(uint32_t num_rows)
+  header: tt_metal/hw/inc/api/compute/experimental/pack_rows_to_addr.h
+  category: pack
+  thread_affinity:
+  - TRISC2_PACK
+  placement: before_pack_rows
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: pack_rows_to_addr_uninit
+  parameters:
+  - name: num_rows
+    type: uint32_t
+    is_template: false
+    description: Number of rows per pack
+  hardware_effects:
+  - 'PACK: sets X counter for row-packing and configures ADDR_MOD_0/1/2'
+  failure_mode: Failing to pair with pack_rows_to_addr_uninit leaves address modifiers corrupted for regular tile packing.
+  description: Initializes packer to stream individual rows from DST to arbitrary L1 memory addresses.
+- name: pack_rows_to_addr_uninit
+  signature: void pack_rows_to_addr_uninit()
+  header: tt_metal/hw/inc/api/compute/experimental/pack_rows_to_addr.h
+  category: pack
+  thread_affinity:
+  - TRISC2_PACK
+  placement: after_pack_rows
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: pack_rows_to_addr_init
+  parameters: []
+  hardware_effects:
+  - 'PACK: restores ADDR_MOD_0/1/2 to PackMode::Default and restores canonical X counters'
+  failure_mode: Downstream ops packing via pack_block_contiguous inherit row-pack address mods, writing corrupted L1 data.
+  description: Restores canonical packer address modifiers after row-packing operations.
+- name: copy_init
+  signature: template <bool is_fp32_dest_acc_en = DST_ACCUM_MODE> void copy_init(uint32_t cbid, uint32_t transpose = 0, uint32_t
+    transpose_within_16x16_face = false)
+  header: tt_metal/hw/inc/api/compute/tile_move_copy.h
+  category: unary_datacopy
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  placement: before_copy_tile
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: null
+  parameters:
+  - name: cbid
+    type: uint32_t
+    is_template: false
+    description: Input CB index
+  - name: transpose
+    type: uint32_t
+    is_template: false
+    description: Transpose flag for tile faces
+  - name: transpose_within_16x16_face
+    type: uint32_t
+    is_template: false
+    description: Transpose flag within 16x16 face
+  hardware_effects:
+  - 'UNPACK: Initializes unpacker A datacopy mode (llk_unpack_A_init)'
+  - 'MATH: Initializes ALU unary datacopy engine (llk_math_eltwise_unary_datacopy_init<A2D>)'
+  - Configures zero-substitution flag state to preserve denormals and -0.0
+  failure_mode: Missing copy_init before copy_tile causes unpacker/math to read stale operands or hang.
+  description: Initializes unpack and math pipelines for copying tiles from circular buffer into DST.
+- name: copy_tile
+  signature: template <bool is_fp32_dest_acc_en = DST_ACCUM_MODE> void copy_tile(uint32_t in_cb_id, uint32_t in_tile_index,
+    uint32_t dst_tile_index)
+  header: tt_metal/hw/inc/api/compute/tile_move_copy.h
+  category: unary_datacopy
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  placement: between_acquire_commit
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: null
+  parameters:
+  - name: in_cb_id
+    type: uint32_t
+    is_template: false
+    description: Input CB index
+  - name: in_tile_index
+    type: uint32_t
+    is_template: false
+    description: Tile index in input CB
+  - name: dst_tile_index
+    type: uint32_t
+    is_template: false
+    description: Destination register slot index
+  hardware_effects:
+  - 'UNPACK: reads tile into SrcA'
+  - 'MATH: copies SrcA into DST[dst_tile_index]'
+  failure_mode: Calling while MATH does not hold DST corrupts destination registers or causes hang.
+  description: Copies a single tile from circular buffer into destination register slot dst_tile_index.
+- name: transpose_init
+  signature: void transpose_init(uint32_t icb, uint32_t ocb)
+  header: tt_metal/hw/inc/api/compute/transpose.h
+  category: unary_datacopy
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  placement: before_transpose_tile
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: null
+  parameters:
+  - name: icb
+    type: uint32_t
+    is_template: false
+    description: Input CB index
+  - name: ocb
+    type: uint32_t
+    is_template: false
+    description: Output CB index
+  hardware_effects:
+  - 'UNPACK: arms unpacker transpose face ordering and stride registers'
+  failure_mode: Missing transpose_init causes copy without transpose.
+  description: Configures Unpack pipeline to transpose tile faces during unpack.
+- name: transpose_tile
+  signature: void transpose_tile(uint32_t icb, uint32_t itile, uint32_t idst)
+  header: tt_metal/hw/inc/api/compute/transpose.h
+  category: unary_datacopy
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  placement: between_acquire_commit
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: null
+  parameters:
+  - name: icb
+    type: uint32_t
+    is_template: false
+    description: Input CB index
+  - name: itile
+    type: uint32_t
+    is_template: false
+    description: Tile index in input CB
+  - name: idst
+    type: uint32_t
+    is_template: false
+    description: Destination register slot index
+  hardware_effects:
+  - 'UNPACK: reads tile transposed into SrcA'
+  - 'MATH: copies transposed tile into DST[idst]'
+  failure_mode: Calling while MATH does not hold DST corrupts destination memory.
+  description: Transposes a tile and copies the transposed result into DST[idst].
+- name: custom_mm_block_init
+  signature: template <PackCustomMmLayout layout = PackCustomMmLayout::Dense> void custom_mm_block_init(uint32_t in0_cb, uint32_t
+    in1_cb, uint32_t out_cb, uint32_t ct_dim, uint32_t rt_dim, uint32_t kt_dim)
+  header: tt_metal/hw/inc/api/compute/experimental/custom_mm.h
+  category: custom_mm
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  - TRISC2_PACK
+  placement: before_custom_mm_block
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: IN_CUSTOM_MM_DENSE_MODE
+    must_pair_with: custom_mm_block_uninit
+  parameters:
+  - name: layout
+    type: PackCustomMmLayout
+    is_template: true
+    description: 'Memory layout: Dense or Strided'
+  - name: in0_cb
+    type: uint32_t
+    is_template: false
+    description: Input activation CB
+  - name: in1_cb
+    type: uint32_t
+    is_template: false
+    description: Input weight CB
+  - name: out_cb
+    type: uint32_t
+    is_template: false
+    description: Output CB
+  - name: ct_dim
+    type: uint32_t
+    is_template: false
+    description: Column dimension
+  - name: rt_dim
+    type: uint32_t
+    is_template: false
+    description: Row dimension
+  - name: kt_dim
+    type: uint32_t
+    is_template: false
+    description: Reduction dimension
+  hardware_effects:
+  - 'PACK: programs customized non-canonical destination offset registers and packing strides for dense sub-blocks'
+  failure_mode: Failing to call custom_mm_block_uninit leaves packer in dense layout mode, corrupting subsequent standard
+    pack_tile calls.
+  description: Initializes high-performance custom matmul with specialized non-canonical destination packing layouts.
+- name: custom_mm_block_uninit
+  signature: template <PackCustomMmLayout layout = PackCustomMmLayout::Dense> void custom_mm_block_uninit(uint32_t out_cb)
+  header: tt_metal/hw/inc/api/compute/experimental/custom_mm.h
+  category: custom_mm
+  thread_affinity:
+  - TRISC2_PACK
+  placement: after_custom_mm_block
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: IN_CUSTOM_MM_DENSE_MODE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: custom_mm_block_init
+  parameters:
+  - name: layout
+    type: PackCustomMmLayout
+    is_template: true
+    description: Memory layout matching init
+  - name: out_cb
+    type: uint32_t
+    is_template: false
+    description: Output CB index
+  hardware_effects:
+  - 'PACK: _llk_pack_custom_mm_uninit_<layout>(pack_src_format[out_cb]) restores canonical destination offset registers'
+  failure_mode: Missing uninit leaves packer reading non-canonical destination offsets, corrupting subsequent tile packing.
+  description: Restores canonical packer destination offset registers after custom matmul block execution.
+- name: face_compressed_mm_block_init
+  signature: void face_compressed_mm_block_init(uint32_t in0_cb, uint32_t in1_cb, uint32_t out_cb, uint32_t ct_dim, uint32_t
+    rt_dim, uint32_t kt_dim)
+  header: tt_metal/hw/inc/api/compute/experimental/face_compressed_mm.h
+  category: custom_mm
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC1_MATH
+  - TRISC2_PACK
+  placement: before_face_compressed_mm_block
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: face_compressed_mm_block_uninit
+  parameters:
+  - name: in0_cb
+    type: uint32_t
+    is_template: false
+    description: Activation CB
+  - name: in1_cb
+    type: uint32_t
+    is_template: false
+    description: Face-compressed weights CB
+  - name: out_cb
+    type: uint32_t
+    is_template: false
+    description: Output CB
+  - name: ct_dim
+    type: uint32_t
+    is_template: false
+    description: Column dimension
+  - name: rt_dim
+    type: uint32_t
+    is_template: false
+    description: Row dimension
+  - name: kt_dim
+    type: uint32_t
+    is_template: false
+    description: Reduction dimension
+  hardware_effects:
+  - 'UNPACK: forces in1 tile descriptor to single face mode'
+  - 'PACK: modifies packing strides and borrows ADCs'
+  failure_mode: Missing uninit leaves ADC counters borrowed and in1 tile descriptor corrupted.
+  description: Initializes matmul with 1-face compressed weights to achieve 4x weight bandwidth reduction.
+- name: face_compressed_mm_block_uninit
+  signature: void face_compressed_mm_block_uninit(uint32_t in0_cb, uint32_t in1_cb)
+  header: tt_metal/hw/inc/api/compute/experimental/face_compressed_mm.h
+  category: custom_mm
+  thread_affinity:
+  - TRISC0_UNPACK
+  - TRISC2_PACK
+  placement: after_face_compressed_mm_block
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: CANONICAL_IDLE
+    postcondition_state: CANONICAL_IDLE
+    must_pair_with: face_compressed_mm_block_init
+  parameters:
+  - name: in0_cb
+    type: uint32_t
+    is_template: false
+    description: Activation CB index
+  - name: in1_cb
+    type: uint32_t
+    is_template: false
+    description: Compressed weights CB index
+  hardware_effects:
+  - 'UNPACK: restores in1 tile descriptor back to 4 faces'
+  - 'PACK: releases borrowed ADCs and restores Wstride_RMW to 64 rows'
+  failure_mode: Corrupts face striding and ADCs for subsequent kernels.
+  description: Restores canonical tile descriptors and ADC counters after face-compressed matmul.
+- name: log_tile_init
+  signature: void log_tile_init()
+  header: tt_metal/hw/inc/api/compute/compute_kernel_api.h
+  category: sfpu_stateful
+  thread_affinity:
+  - TRISC1_MATH
+  placement: before_log_tile
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: null
+  parameters: []
+  hardware_effects:
+  - Writes sfpi::vConstFloatPrgm0 = 0.69314718f (ln2)
+  - Writes sfpi::vConstFloatPrgm1 = 0.10968964f
+  - Writes sfpi::vConstFloatPrgm2 = -0.72910421f
+  failure_mode: If another op clobbers vConstFloatPrgm0..2 and log_tile runs without re-init, mathematical corruption occurs.
+  description: Programs SFPU programmable constant registers with ln(2) and polynomial coefficients for logarithm.
+- name: log_tile
+  signature: void log_tile(uint32_t idst)
+  header: tt_metal/hw/inc/api/compute/compute_kernel_api.h
+  category: sfpu_stateful
+  thread_affinity:
+  - TRISC1_MATH
+  placement: between_acquire_commit
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: log_tile_init
+  parameters:
+  - name: idst
+    type: uint32_t
+    is_template: false
+    description: Destination register slot index
+  hardware_effects:
+  - Executes vector natural log in-place on DST[idst] using vConstFloatPrgm0..2
+  failure_mode: Executing without log_tile_init produces wrong numerical values.
+  description: Computes natural logarithm element-wise in-place on tile in destination register.
+- name: mul_int_tile_init
+  signature: void mul_int_tile_init()
+  header: tt_metal/hw/inc/api/compute/mul_int_sfpu.h
+  category: sfpu_stateful
+  thread_affinity:
+  - TRISC1_MATH
+  placement: before_mul_int_tile
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: null
+  parameters: []
+  hardware_effects:
+  - Writes sfpi::vConstIntPrgm0 = 0x000000FF
+  - Writes sfpi::vConstIntPrgm1 = -8
+  failure_mode: If integer masks are overwritten by float constants, subsequent integer multiplications compute corrupted
+    values.
+  description: Initializes SFPU integer multiplication masks in programmable integer constant registers.
+- name: mul_int_tile
+  signature: void mul_int_tile(uint32_t idst)
+  header: tt_metal/hw/inc/api/compute/mul_int_sfpu.h
+  category: sfpu_stateful
+  thread_affinity:
+  - TRISC1_MATH
+  placement: between_acquire_commit
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: mul_int_tile_init
+  parameters:
+  - name: idst
+    type: uint32_t
+    is_template: false
+    description: Destination register slot index
+  hardware_effects:
+  - Executes in-place integer multiplication on DST[idst] using integer bitmask constants
+  failure_mode: Executing without mul_int_tile_init causes bit corruption in integer product.
+  description: Computes element-wise integer multiplication in-place on destination register tile.
+- name: where_tile_init
+  signature: void where_tile_init()
+  header: tt_metal/hw/inc/api/compute/eltwise_unary/where.h
+  category: sfpu_stateful
+  thread_affinity:
+  - TRISC1_MATH
+  placement: before_where_tile
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: null
+  parameters: []
+  hardware_effects:
+  - Loads SFPU instruction template via TTI_SFPSETCC and TTI_SFPENCC
+  - Loads macro program via TTI_SFPLOADI into SFPU micro-code memory
+  failure_mode: Executing where_tile without init causes invalid opcode execution in SFPU.
+  description: Loads hardware macro program and condition-code instructions for ternary where selection.
+- name: where_tile
+  signature: void where_tile(uint32_t idst_pred, uint32_t idst_true, uint32_t idst_false, uint32_t idst_out)
+  header: tt_metal/hw/inc/api/compute/eltwise_unary/where.h
+  category: sfpu_stateful
+  thread_affinity:
+  - TRISC1_MATH
+  placement: between_acquire_commit
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: where_tile_init
+  parameters:
+  - name: idst_pred
+    type: uint32_t
+    is_template: false
+    description: Predicate condition tile index
+  - name: idst_true
+    type: uint32_t
+    is_template: false
+    description: True branch value tile index
+  - name: idst_false
+    type: uint32_t
+    is_template: false
+    description: False branch value tile index
+  - name: idst_out
+    type: uint32_t
+    is_template: false
+    description: Output tile index
+  hardware_effects:
+  - Executes microcoded SFPU conditional select across tiles in DST
+  failure_mode: Executing without where_tile_init executes stale or uninitialized SFPU macro instructions.
+  description: 'Evaluates elementwise ternary where selection: out = pred ? true_val : false_val.'
+- name: topk_tile_init
+  signature: void topk_tile_init()
+  header: tt_metal/hw/inc/api/compute/topk.h
+  category: sfpu_stateful
+  thread_affinity:
+  - TRISC1_MATH
+  placement: before_topk_tile
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: null
+  parameters: []
+  hardware_effects:
+  - Writes sfpi::vConstIntPrgm0 = TOPK_LO16_MASK
+  - Writes sfpi::vConstIntPrgm1 = TOPK_TAG_MASK
+  - Initializes SFPU bitonic sort comparison templates
+  failure_mode: Bitonic sorting network misorders keys or corrupts index payload tags.
+  description: Initializes constant bitmasks and comparison primitives for TopK sorting.
+- name: rand_tile_init
+  signature: void rand_tile_init(uint32_t seed = 0, uint32_t stream_id = 0)
+  header: tt_metal/hw/inc/api/compute/eltwise_unary/rand.h
+  category: sfpu_stateful
+  thread_affinity:
+  - TRISC1_MATH
+  placement: before_rand_tile
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: null
+  parameters:
+  - name: seed
+    type: uint32_t
+    is_template: false
+    description: Base PRNG seed
+  - name: stream_id
+    type: uint32_t
+    is_template: false
+    description: Domain-separating stream ID
+  hardware_effects:
+  - Initializes PRNG state
+  - Programs LREG12 and LREG13 on Wormhole (clobbering vConstIntPrgm0/1)
+  - Records replay slots 0-16 in SFPU replay buffer
+  failure_mode: Clobbers programmable constants used by subsequent SFPU ops if not re-initialized.
+  description: Initializes pseudo-random number generator state and programmable constant registers.
+- name: rand_tile
+  signature: void rand_tile(uint32_t idst)
+  header: tt_metal/hw/inc/api/compute/eltwise_unary/rand.h
+  category: sfpu_stateful
+  thread_affinity:
+  - TRISC1_MATH
+  placement: between_acquire_commit
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: rand_tile_init
+  parameters:
+  - name: idst
+    type: uint32_t
+    is_template: false
+    description: Destination register slot index
+  hardware_effects:
+  - Generates uniform pseudo-random floats in [0, 1) into DST[idst]
+  failure_mode: Unseeded execution generates deterministic pseudo-random constants.
+  description: Fills destination register tile with uniform pseudo-random values.
+- name: exp_tile_init
+  signature: template <bool APPROX = false> void exp_tile_init()
+  header: tt_metal/hw/inc/api/compute/compute_kernel_api.h
+  category: sfpu_stateless
+  thread_affinity:
+  - TRISC1_MATH
+  placement: before_exp_tile
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: null
+  parameters:
+  - name: APPROX
+    type: bool
+    is_template: true
+    description: Enable fast polynomial approximation
+  hardware_effects:
+  - Calls generic base SFPU initialization
+  failure_mode: Safe if omitted when prior generic SFPU init ran, but required if stateful SFPU op preceded it.
+  description: Initializes SFPU engine for exponential function.
+- name: exp_tile
+  signature: template <bool APPROX = false> void exp_tile(uint32_t idst)
+  header: tt_metal/hw/inc/api/compute/compute_kernel_api.h
+  category: sfpu_stateless
+  thread_affinity:
+  - TRISC1_MATH
+  placement: between_acquire_commit
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: exp_tile_init
+  parameters:
+  - name: APPROX
+    type: bool
+    is_template: true
+    description: Enable fast polynomial approximation
+  - name: idst
+    type: uint32_t
+    is_template: false
+    description: Destination register slot index
+  hardware_effects:
+  - Computes vector exponential element-wise in-place on DST[idst]
+  failure_mode: Executing while MATH does not hold DST section leads to undefined destination memory.
+  description: Computes exponential element-wise in-place on tile in destination register.
+- name: sqrt_tile_init
+  signature: template <bool APPROX = false> void sqrt_tile_init()
+  header: tt_metal/hw/inc/api/compute/compute_kernel_api.h
+  category: sfpu_stateless
+  thread_affinity:
+  - TRISC1_MATH
+  placement: before_sqrt_tile
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: null
+  parameters:
+  - name: APPROX
+    type: bool
+    is_template: true
+    description: Fast polynomial approximation
+  hardware_effects:
+  - Generic base SFPU initialization
+  failure_mode: Required if prior stateful SFPU op clobbered registers.
+  description: Initializes SFPU engine for square root function.
+- name: sqrt_tile
+  signature: template <bool APPROX = false> void sqrt_tile(uint32_t idst)
+  header: tt_metal/hw/inc/api/compute/compute_kernel_api.h
+  category: sfpu_stateless
+  thread_affinity:
+  - TRISC1_MATH
+  placement: between_acquire_commit
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: sqrt_tile_init
+  parameters:
+  - name: APPROX
+    type: bool
+    is_template: true
+    description: Fast polynomial approximation
+  - name: idst
+    type: uint32_t
+    is_template: false
+    description: Destination register slot index
+  hardware_effects:
+  - Computes element-wise square root in-place on DST[idst]
+  failure_mode: Negative values yield NaN without exception.
+  description: Computes square root element-wise in-place on tile in destination register.
+- name: rsqrt_tile_init
+  signature: template <bool APPROX = false> void rsqrt_tile_init()
+  header: tt_metal/hw/inc/api/compute/compute_kernel_api.h
+  category: sfpu_stateless
+  thread_affinity:
+  - TRISC1_MATH
+  placement: before_rsqrt_tile
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: null
+  parameters:
+  - name: APPROX
+    type: bool
+    is_template: true
+    description: Fast approximation
+  hardware_effects:
+  - Generic base SFPU initialization
+  failure_mode: Required if preceded by stateful SFPU operation.
+  description: Initializes SFPU engine for reciprocal square root.
+- name: rsqrt_tile
+  signature: template <bool APPROX = false> void rsqrt_tile(uint32_t idst)
+  header: tt_metal/hw/inc/api/compute/compute_kernel_api.h
+  category: sfpu_stateless
+  thread_affinity:
+  - TRISC1_MATH
+  placement: between_acquire_commit
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: rsqrt_tile_init
+  parameters:
+  - name: APPROX
+    type: bool
+    is_template: true
+    description: Fast approximation
+  - name: idst
+    type: uint32_t
+    is_template: false
+    description: Destination register slot index
+  hardware_effects:
+  - Computes 1/sqrt(x) element-wise in-place on DST[idst]
+  failure_mode: Zeroes yield +Inf.
+  description: Computes reciprocal square root element-wise in-place on tile in destination register.
+- name: gelu_tile_init
+  signature: template <bool FAST_AND_APPROX = false> void gelu_tile_init()
+  header: tt_metal/hw/inc/api/compute/compute_kernel_api.h
+  category: sfpu_stateless
+  thread_affinity:
+  - TRISC1_MATH
+  placement: before_gelu_tile
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: null
+  parameters:
+  - name: FAST_AND_APPROX
+    type: bool
+    is_template: true
+    description: Fast approximation flag
+  hardware_effects:
+  - Generic base SFPU initialization
+  failure_mode: Required if preceded by stateful SFPU operation.
+  description: Initializes SFPU engine for Gaussian Error Linear Unit activation.
+- name: gelu_tile
+  signature: template <bool FAST_AND_APPROX = false> void gelu_tile(uint32_t idst)
+  header: tt_metal/hw/inc/api/compute/compute_kernel_api.h
+  category: sfpu_stateless
+  thread_affinity:
+  - TRISC1_MATH
+  placement: between_acquire_commit
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: gelu_tile_init
+  parameters:
+  - name: FAST_AND_APPROX
+    type: bool
+    is_template: true
+    description: Fast approximation
+  - name: idst
+    type: uint32_t
+    is_template: false
+    description: Destination register slot index
+  hardware_effects:
+  - Computes GELU activation in-place on DST[idst]
+  failure_mode: Calling without holding DST corrupts destination register.
+  description: Computes GELU element-wise in-place on tile in destination register.
+- name: recip_tile_init
+  signature: template <bool APPROX = false> void recip_tile_init()
+  header: tt_metal/hw/inc/api/compute/compute_kernel_api.h
+  category: sfpu_stateless
+  thread_affinity:
+  - TRISC1_MATH
+  placement: before_recip_tile
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: null
+  parameters:
+  - name: APPROX
+    type: bool
+    is_template: true
+    description: Fast approximation
+  hardware_effects:
+  - Generic base SFPU initialization
+  failure_mode: Required if preceded by stateful SFPU operation.
+  description: Initializes SFPU engine for reciprocal (1/x).
+- name: recip_tile
+  signature: template <bool APPROX = false> void recip_tile(uint32_t idst)
+  header: tt_metal/hw/inc/api/compute/compute_kernel_api.h
+  category: sfpu_stateless
+  thread_affinity:
+  - TRISC1_MATH
+  placement: between_acquire_commit
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: recip_tile_init
+  parameters:
+  - name: APPROX
+    type: bool
+    is_template: true
+    description: Fast approximation
+  - name: idst
+    type: uint32_t
+    is_template: false
+    description: Destination register slot index
+  hardware_effects:
+  - Computes 1/x element-wise in-place on DST[idst]
+  failure_mode: Division by zero produces signed infinity.
+  description: Computes reciprocal element-wise in-place on tile in destination register.
+- name: sigmoid_tile_init
+  signature: void sigmoid_tile_init()
+  header: tt_metal/hw/inc/api/compute/compute_kernel_api.h
+  category: sfpu_stateless
+  thread_affinity:
+  - TRISC1_MATH
+  placement: before_sigmoid_tile
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: null
+  parameters: []
+  hardware_effects:
+  - Generic base SFPU initialization
+  failure_mode: Required if preceded by stateful SFPU operation.
+  description: Initializes SFPU engine for sigmoid activation function.
+- name: sigmoid_tile
+  signature: void sigmoid_tile(uint32_t idst)
+  header: tt_metal/hw/inc/api/compute/compute_kernel_api.h
+  category: sfpu_stateless
+  thread_affinity:
+  - TRISC1_MATH
+  placement: between_acquire_commit
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: sigmoid_tile_init
+  parameters:
+  - name: idst
+    type: uint32_t
+    is_template: false
+    description: Destination register slot index
+  hardware_effects:
+  - Computes 1 / (1 + exp(-x)) in-place on DST[idst]
+  failure_mode: Calling without holding DST corrupts destination register.
+  description: Computes sigmoid activation element-wise in-place on tile in destination register.
+- name: tanh_tile_init
+  signature: void tanh_tile_init()
+  header: tt_metal/hw/inc/api/compute/compute_kernel_api.h
+  category: sfpu_stateless
+  thread_affinity:
+  - TRISC1_MATH
+  placement: before_tanh_tile
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: null
+  parameters: []
+  hardware_effects:
+  - Generic base SFPU initialization
+  failure_mode: Required if preceded by stateful SFPU operation.
+  description: Initializes SFPU engine for hyperbolic tangent function.
+- name: tanh_tile
+  signature: void tanh_tile(uint32_t idst)
+  header: tt_metal/hw/inc/api/compute/compute_kernel_api.h
+  category: sfpu_stateless
+  thread_affinity:
+  - TRISC1_MATH
+  placement: between_acquire_commit
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: tanh_tile_init
+  parameters:
+  - name: idst
+    type: uint32_t
+    is_template: false
+    description: Destination register slot index
+  hardware_effects:
+  - Computes tanh(x) in-place on DST[idst]
+  failure_mode: Calling without holding DST corrupts destination register.
+  description: Computes hyperbolic tangent element-wise in-place on tile in destination register.
+- name: relu_tile_init
+  signature: void relu_tile_init()
+  header: tt_metal/hw/inc/api/compute/compute_kernel_api.h
+  category: sfpu_stateless
+  thread_affinity:
+  - TRISC1_MATH
+  placement: before_relu_tile
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: null
+  parameters: []
+  hardware_effects:
+  - Generic base SFPU initialization
+  failure_mode: Required if preceded by stateful SFPU operation.
+  description: Initializes SFPU engine for Rectified Linear Unit activation.
+- name: relu_tile
+  signature: void relu_tile(uint32_t idst)
+  header: tt_metal/hw/inc/api/compute/compute_kernel_api.h
+  category: sfpu_stateless
+  thread_affinity:
+  - TRISC1_MATH
+  placement: between_acquire_commit
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: relu_tile_init
+  parameters:
+  - name: idst
+    type: uint32_t
+    is_template: false
+    description: Destination register slot index
+  hardware_effects:
+  - Computes max(0, x) in-place on DST[idst]
+  failure_mode: Calling without holding DST corrupts destination register.
+  description: Computes ReLU activation element-wise in-place on tile in destination register.
+- name: typecast_tile_init
+  signature: void typecast_tile_init()
+  header: tt_metal/hw/inc/api/compute/eltwise_unary/typecast.h
+  category: sfpu_stateless
+  thread_affinity:
+  - TRISC1_MATH
+  placement: before_typecast_tile
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: null
+  parameters: []
+  hardware_effects:
+  - Generic base SFPU initialization for numerical conversion
+  failure_mode: Required if preceded by stateful SFPU operation.
+  description: Initializes SFPU engine for format typecasting in destination registers.
+- name: typecast_tile
+  signature: template <DataType in_data_type, DataType out_data_type> void typecast_tile(uint32_t idst)
+  header: tt_metal/hw/inc/api/compute/eltwise_unary/typecast.h
+  category: sfpu_stateless
+  thread_affinity:
+  - TRISC1_MATH
+  placement: between_acquire_commit
+  allowed_in_loop: true
+  state_machine:
+    precondition_state: MATH_DST_HELD
+    postcondition_state: MATH_DST_HELD
+    must_pair_with: typecast_tile_init
+  parameters:
+  - name: in_data_type
+    type: DataType
+    is_template: true
+    description: Source data type (e.g. Float16_b, Int32)
+  - name: out_data_type
+    type: DataType
+    is_template: true
+    description: Target data type (e.g. Float32, UInt16)
+  - name: idst
+    type: uint32_t
+    is_template: false
+    description: Destination register slot index
+  hardware_effects:
+  - Converts numerical representation of elements in DST[idst] in-place
+  failure_mode: Mismatched data types or unheld DST causes bit corruption or NaN propagation.
+  description: Converts tile in-place from in_data_type to out_data_type in destination register.
