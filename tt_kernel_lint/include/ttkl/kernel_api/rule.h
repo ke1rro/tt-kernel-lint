@@ -1,25 +1,21 @@
 #pragma once
-#include "includes/common.h"
+#include "ttkl/kernel_api/common.h"
 #include <string_view>
 #include <vector>
 
-// STRUCT THAT DESCRIBES AN INSTRUCTION
-// FROM api_spec.yaml
-
 namespace tt_lint {
 
-struct Instruction
-{
+struct Instruction {
     std::string_view name;
     std::string_view signature;
+    std::string_view must_pair_with;
+    std::string_view failure_mode;
+    std::string_view description;
     Category category;
     ThreadKind thread_affinity;
     State precondition_state;
     State postcondition_state;
-    std::string_view must_pair_with; // e.g. "tilize_uninit", or "" if none
     bool allowed_in_loop;
-    std::string_view failure_mode;
-    std::string_view description;
 };
 
-} // namespace tt_lint
+}  // namespace tt_lint

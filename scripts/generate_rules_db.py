@@ -2,69 +2,95 @@
 """
 scripts/generate_rules_db.py
 
-Generates a C++ header (includes/rules_db.h) containing constexpr Instruction tables
+Generates a C++ header (tt_kernel_lint/include/ttkl/kernel_api/rules_db.h)
+containing constexpr Instruction tables
 and fast O(1) lookup maps from specs/api_spec.yaml.
-Uses types defined in includes/common.h and includes/rule.h.
+Uses types defined in ttkl/kernel_api/common.h and ttkl/kernel_api/rule.h.
 """
 
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
 
 import yaml
 
 CATEGORY_MAP = {
-    "startup": "Category::Startup",
-    "cleanup": "Category::Cleanup",
-    "reg_lifecycle": "Category::RegLifecycle",
-    "cb_lifecycle": "Category::CbLifecycle",
-    "dataflow_noc": "Category::DataflowNoc",
-    "reconfig": "Category::Reconfig",
-    "matmul": "Category::Matmul",
-    "binary_eltwise": "Category::BinaryEltwise",
-    "bcast_eltwise": "Category::BcastEltwise",
-    "reduce": "Category::Reduce",
-    "tilize": "Category::Tilize",
-    "untilize": "Category::Untilize",
-    "pack": "Category::Pack",
-    "unary_datacopy": "Category::UnaryDatacopy",
-    "custom_mm": "Category::CustomMm",
-    "sfpu_stateful": "Category::SfpuStateful",
-    "sfpu_stateless": "Category::SfpuStateless",
+    "startup": "Category::kStartup",
+    "cleanup": "Category::kCleanup",
+    "reg_lifecycle": "Category::kRegLifecycle",
+    "cb_lifecycle": "Category::kCbLifecycle",
+    "dataflow_noc": "Category::kDataflowNoc",
+    "reconfig": "Category::kReconfig",
+    "matmul": "Category::kMatmul",
+    "binary_eltwise": "Category::kBinaryEltwise",
+    "bcast_eltwise": "Category::kBcastEltwise",
+    "reduce": "Category::kReduce",
+    "tilize": "Category::kTilize",
+    "untilize": "Category::kUntilize",
+    "pack": "Category::kPack",
+    "unary_datacopy": "Category::kUnaryDatacopy",
+    "custom_mm": "Category::kCustomMm",
+    "sfpu_stateful": "Category::kSfpuStateful",
+    "sfpu_stateless": "Category::kSfpuStateless",
 }
 
 THREAD_MAP = {
-    "TRISC0_UNPACK": "ThreadKind::TRISC0_UNPACK",
-    "TRISC1_MATH": "ThreadKind::TRISC1_MATH",
-    "TRISC2_PACK": "ThreadKind::TRISC2_PACK",
-    "DM_BRISC": "ThreadKind::BRISC",
-    "DM_NCRISC": "ThreadKind::NCRISC",
-    "BRISC": "ThreadKind::BRISC",
-    "NCRISC": "ThreadKind::NCRISC",
+    "TRISC0_UNPACK": "ThreadKind::kTrisc0Unpack",
+    "TRISC1_MATH": "ThreadKind::kTrisc1Math",
+    "TRISC2_PACK": "ThreadKind::kTrisc2Pack",
+    "DM_BRISC": "ThreadKind::kBrisc",
+    "DM_NCRISC": "ThreadKind::kNcrisc",
+    "BRISC": "ThreadKind::kBrisc",
+    "NCRISC": "ThreadKind::kNcrisc",
 }
 
 STATE_MAP = {
-    "ANY": "State::ANY",
-    "None": "State::ANY",
-    "null": "State::ANY",
-    "": "State::ANY",
-    "UNINITIALIZED": "State::UNINITIALIZED",
-    "CANONICAL_IDLE": "State::CANONICAL_IDLE",
-    "MATH_IDLE": "State::MATH_IDLE",
-    "MATH_DST_HELD": "State::MATH_DST_HELD",
-    "PACK_IDLE": "State::PACK_IDLE",
-    "PACK_DST_HELD": "State::PACK_DST_HELD",
-    "CB_TILES_AVAILABLE": "State::CB_TILES_AVAILABLE",
-    "CB_SLOTS_RESERVED": "State::CB_SLOTS_RESERVED",
-    "NOC_READ_IN_FLIGHT": "State::NOC_READ_IN_FLIGHT",
-    "NOC_WRITE_IN_FLIGHT": "State::NOC_WRITE_IN_FLIGHT",
-    "IN_TILIZE_MODE": "State::IN_TILIZE_MODE",
-    "IN_UNTILIZE_MODE": "State::IN_UNTILIZE_MODE",
-    "IN_REDUCE_MODE": "State::IN_REDUCE_MODE",
-    "IN_UNARY_BCAST_MODE": "State::IN_UNARY_BCAST_MODE",
-    "IN_CUSTOM_MM_DENSE_MODE": "State::IN_CUSTOM_MM_DENSE_MODE",
+    "ANY": "State::kAny",
+    "None": "State::kAny",
+    "null": "State::kAny",
+    "": "State::kAny",
+    "UNINITIALIZED": "State::kUninitialized",
+    "CANONICAL_IDLE": "State::kCanonicalIdle",
+    "MATH_IDLE": "State::kMathIdle",
+    "MATH_DST_HELD": "State::kMathDstHeld",
+    "PACK_IDLE": "State::kPackIdle",
+    "PACK_DST_HELD": "State::kPackDstHeld",
+    "CB_TILES_AVAILABLE": "State::kCbTilesAvailable",
+    "CB_SLOTS_RESERVED": "State::kCbSlotsReserved",
+    "NOC_READ_IN_FLIGHT": "State::kNocReadInFlight",
+    "NOC_WRITE_IN_FLIGHT": "State::kNocWriteInFlight",
+    "IN_TILIZE_MODE": "State::kInTilizeMode",
+    "IN_UNTILIZE_MODE": "State::kInUntilizeMode",
+    "IN_REDUCE_MODE": "State::kInReduceMode",
+    "IN_UNARY_BCAST_MODE": "State::kInUnaryBcastMode",
+    "IN_CUSTOM_MM_DENSE_MODE": "State::kInCustomMmDenseMode",
 }
+
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def format_with_clang_format(source: str, output_path: str) -> str:
+    """Formats generated C++ with the repository .clang-format, as the hook does."""
+    venv_binary = os.path.join(REPO_ROOT, ".venv", "bin", "clang-format")
+    binary = (
+        venv_binary if os.path.isfile(venv_binary) else shutil.which("clang-format")
+    )
+    if binary is None:
+        print("Error: clang-format not found (run setup.sh).", file=sys.stderr)
+        sys.exit(1)
+    result = subprocess.run(
+        [binary, "--style=file", f"--assume-filename={os.path.abspath(output_path)}"],
+        input=source,
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=REPO_ROOT,
+    )
+    return result.stdout
 
 
 def c_str(s: str | None) -> str:
@@ -76,14 +102,14 @@ def c_str(s: str | None) -> str:
 
 def format_threads(threads: list[str]) -> str:
     if not threads:
-        return "ThreadKind::None"
+        return "ThreadKind::kNone"
     cpp_threads = [THREAD_MAP.get(t, f"ThreadKind::{t}") for t in threads]
     return " | ".join(cpp_threads)
 
 
 def format_state(state: str | None) -> str:
     if state is None:
-        return "State::ANY"
+        return "State::kAny"
     s = str(state)
     return STATE_MAP.get(s, f"State::{s}")
 
@@ -98,7 +124,7 @@ def generate_cpp(yaml_path: str, output_path: str) -> None:
     lines = [
         "#pragma once",
         "",
-        '#include "includes/rule.h"',
+        '#include "ttkl/kernel_api/rule.h"',
         "#include <array>",
         "#include <cstddef>",
         "#include <string_view>",
@@ -114,7 +140,7 @@ def generate_cpp(yaml_path: str, output_path: str) -> None:
     for idx, inst in enumerate(instructions):
         name = inst.get("name", "")
         signature = inst.get("signature", "")
-        category = CATEGORY_MAP.get(inst.get("category", ""), "Category::Startup")
+        category = CATEGORY_MAP.get(inst.get("category", ""), "Category::kStartup")
         threads = format_threads(inst.get("thread_affinity", []))
 
         state_machine = inst.get("state_machine", {})
@@ -130,14 +156,14 @@ def generate_cpp(yaml_path: str, output_path: str) -> None:
         lines.append("    Instruction{")
         lines.append(f"        .name = {c_str(name)},")
         lines.append(f"        .signature = {c_str(signature)},")
+        lines.append(f"        .must_pair_with = {must_pair},")
+        lines.append(f"        .failure_mode = {failure_mode},")
+        lines.append(f"        .description = {description},")
         lines.append(f"        .category = {category},")
         lines.append(f"        .thread_affinity = {threads},")
         lines.append(f"        .precondition_state = {pre_state},")
         lines.append(f"        .postcondition_state = {post_state},")
-        lines.append(f"        .must_pair_with = {must_pair},")
-        lines.append(f"        .allowed_in_loop = {allowed_in_loop},")
-        lines.append(f"        .failure_mode = {failure_mode},")
-        lines.append(f"        .description = {description}")
+        lines.append(f"        .allowed_in_loop = {allowed_in_loop}")
         lines.append(f"    }}{comma}")
 
     lines.extend(
@@ -180,7 +206,7 @@ def generate_cpp(yaml_path: str, output_path: str) -> None:
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
+        f.write(format_with_clang_format("\n".join(lines), output_path))
 
     print(f"Successfully generated {output_path} ({count} instructions).")
 
@@ -198,8 +224,11 @@ def main() -> None:
     parser.add_argument(
         "--output",
         "-o",
-        default="includes/rules_db.h",
-        help="Path to output C++ header file (default: includes/rules_db.h)",
+        default="tt_kernel_lint/include/ttkl/kernel_api/rules_db.h",
+        help=(
+            "Path to output C++ header file "
+            "(default: tt_kernel_lint/include/ttkl/kernel_api/rules_db.h)"
+        ),
     )
     args = parser.parse_args()
 

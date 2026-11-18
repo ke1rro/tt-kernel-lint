@@ -20,6 +20,11 @@ target_link_libraries(
   ${PROJECT_NAME} PRIVATE libclang clangTooling clangAST clangASTMatchers
                           clangFrontend clangBasic)
 
+add_library(tt_kernel_lint_kernel_api INTERFACE)
+target_include_directories(tt_kernel_lint_kernel_api
+                           INTERFACE tt_kernel_lint/include)
+target_link_libraries(${PROJECT_NAME} PRIVATE tt_kernel_lint_kernel_api)
+
 option(BUILD_KERNELS
        "Build the Metalium host example and its runtime dependencies" OFF)
 
