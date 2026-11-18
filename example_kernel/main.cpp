@@ -1,9 +1,12 @@
 #include <cmath>
 #include <iostream>
+#include <string_view>
 #include <utility>
 #include <tt-metalium/core_coord.hpp>
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/device.hpp>
+#include <tt-metalium/experimental/mock_device/mock_device.hpp>
+#include <tt-metalium/experimental/program_preparation.hpp>
 #include <tt-metalium/bfloat16.hpp>
 #include <tt-metalium/tensor_accessor_args.hpp>
 #include <tt-metalium/distributed.hpp>
@@ -36,7 +39,29 @@ std::vector<bfloat16> generate_data(float a, float b) {
 
 // Two input tiles: one 32x32 tile per matrix; one output tile.
 // Data Type: bfloat16
-int main() {
+int main(int argc, char** argv) {
+    bool compile_only = false;
+    bool mock = false;
+    if (argc == 2 && std::string_view(argv[1]) == "--help") {
+        std::cout << "Usage: example_kernel [--jit-without-device | --jit-with-device]\n"
+                     "No option runs and checks the kernel on device 0.\n"
+                     "--jit-without-device uses TT-Metal's predefined Wormhole configuration.\n"
+                     "--jit-with-device opens device 0 and uses its initialized configuration.\n"
+                     "Both JIT modes build device binaries without dispatching the example kernel.\n";
+        return 0;
+    }
+    if (argc == 2) {
+        const std::string_view mode(argv[1]);
+        mock = mode == "--jit-without-device" || mode == "--mock-compile-only";
+        compile_only = mock || mode == "--jit-with-device" || mode == "--compile-only";
+    }
+    if (argc > 1 && !compile_only) {
+        std::cerr << "Unknown arguments. Use --help.\n";
+        return 2;
+    }
+    if (mock) {
+        experimental::configure_mock_mode(tt::ARCH::WORMHOLE_B0, 1);
+    }
     bool pass{true};
     constexpr float value_to_add_to_matrix_A{1.0F};
     constexpr CoreCoord core = {0, 0};
@@ -47,7 +72,6 @@ int main() {
 
     distributed::MeshWorkload workload;
 
-    distributed::MeshCommandQueue& command_queue = mesh_device->mesh_command_queue();
     const auto device_range = distributed::MeshCoordinateRange(mesh_device->shape());
     Program program{CreateProgram()};
 
@@ -64,9 +88,6 @@ int main() {
     auto a_data{generate_data(0.0F, 1.0F)};
     // Matrix B
     auto b_data{std::vector<bfloat16>(Params::elems_per_tile, bfloat16(value_to_add_to_matrix_A))};
-
-    distributed::EnqueueWriteMeshBuffer(command_queue, src0_dram_buffer, a_data, false);
-    distributed::EnqueueWriteMeshBuffer(command_queue, src1_dram_buffer, b_data, false);
 
     // CBs
     tt::CBIndex src0_cb{tt::CBIndex::c_0};
@@ -134,6 +155,15 @@ int main() {
     SetRuntimeArgs(program, writer, core, {static_cast<uint32_t>(dst_dram_buffer->address())});
 
     workload.add_program(device_range, std::move(program));
+    if (compile_only) {
+        experimental::program_preparation::prepare(*mesh_device, workload);
+        std::cout << (mock ? "JIT without device completed" : "JIT with device completed") << '\n';
+        return mesh_device->close() ? 0 : 1;
+    }
+
+    auto& command_queue = mesh_device->mesh_command_queue();
+    distributed::EnqueueWriteMeshBuffer(command_queue, src0_dram_buffer, a_data, false);
+    distributed::EnqueueWriteMeshBuffer(command_queue, src1_dram_buffer, b_data, false);
     distributed::EnqueueMeshWorkload(command_queue, workload, false);
     distributed::Finish(command_queue);
 

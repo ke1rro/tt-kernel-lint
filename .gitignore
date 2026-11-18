@@ -166,3 +166,6 @@ Testing
 .auto_triage/output
 .github/actions/*/node_modules/
 models/experimental/petr/resources/*.pth
+
+# Local JIT captures, SDK overlays, compiler logs and AST dumps
+/tt-kernel-lint-captures/
