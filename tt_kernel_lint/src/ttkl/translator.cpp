@@ -8,7 +8,9 @@
 #include <utility>
 #include <vector>
 
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/Path.h"
@@ -27,7 +29,7 @@ namespace {
 
 using namespace rules;
 
-bool Contains(std::span<const std::string_view> values, std::string_view value) {
+[[nodiscard]] bool Contains(std::span<const std::string_view> values, std::string_view value) {
     for (const std::string_view candidate : values) {
         if (candidate == value) {
             return true;
@@ -36,7 +38,7 @@ bool Contains(std::span<const std::string_view> values, std::string_view value) 
     return false;
 }
 
-bool StartsWithAny(std::span<const std::string_view> prefixes, std::string_view argument) {
+[[nodiscard]] bool StartsWithAny(std::span<const std::string_view> prefixes, std::string_view argument) {
     for (const std::string_view prefix : prefixes) {
         if (argument.starts_with(prefix)) {
             return true;
@@ -45,7 +47,8 @@ bool StartsWithAny(std::span<const std::string_view> prefixes, std::string_view 
     return false;
 }
 
-std::optional<std::string_view> FindExact(std::span<const OptionRule> options, std::string_view argument) {
+[[nodiscard]] std::optional<std::string_view> FindExact(
+    std::span<const OptionRule> options, std::string_view argument) {
     for (const auto& [name, reason] : options) {
         if (name == argument) {
             return reason;
@@ -54,7 +57,8 @@ std::optional<std::string_view> FindExact(std::span<const OptionRule> options, s
     return std::nullopt;
 }
 
-std::optional<std::string_view> FindPrefix(std::span<const OptionRule> options, std::string_view argument) {
+[[nodiscard]] std::optional<std::string_view> FindPrefix(
+    std::span<const OptionRule> options, std::string_view argument) {
     for (const auto& [name, reason] : options) {
         if (argument.starts_with(name)) {
             return reason;
@@ -63,12 +67,12 @@ std::optional<std::string_view> FindPrefix(std::span<const OptionRule> options, 
     return std::nullopt;
 }
 
-bool IsKeptJoined(std::string_view argument) {
+[[nodiscard]] bool IsKeptJoined(std::string_view argument) {
     return StartsWithAny(kKeptPrefixes, argument) && !StartsWithAny(kForwardingPrefixes, argument);
 }
 
 // TT-Metal runs the compiler as "ccache [KEY=VALUE...] <compiler>" when TT_METAL_CCACHE_KERNEL_SUPPORT is set.
-llvm::Expected<std::size_t> CompilerIndex(std::span<const std::string> arguments) {
+[[nodiscard]] llvm::Expected<std::size_t> CompilerIndex(std::span<const std::string> arguments) {
     if (arguments.empty()) {
         return llvm::make_error<TranslationError>(TranslationErrorKind::kMalformedCommand, kNoArgumentsMessage);
     }
@@ -84,15 +88,6 @@ llvm::Expected<std::size_t> CompilerIndex(std::span<const std::string> arguments
         return llvm::make_error<TranslationError>(TranslationErrorKind::kMalformedCommand, kNoCompilerMessage);
     }
     return index;
-}
-
-std::string JoinArguments(std::span<const std::string> arguments) {
-    std::string text;
-    for (const std::string& argument : arguments) {
-        text += text.empty() ? "" : " ";
-        text += argument;
-    }
-    return text;
 }
 
 class CommandTranslation {
@@ -141,6 +136,7 @@ private:
     void AddSystemIncludes();
     void AddTypeModel();
     void AddDiagnostics();
+    void AddHeaderPatches();
 };
 
 llvm::Error CommandTranslation::RequireOperand(std::size_t index) const {
@@ -214,11 +210,8 @@ llvm::Error CommandTranslation::TranslateCpu(std::string_view argument) {
         Keep(mabi_option);
         return llvm::Error::success();
     }
-    std::string supported;
-    for (const CpuMapping& cpu : profile.cpus) {
-        supported += supported.empty() ? "" : ", ";
-        supported += cpu.mcpu;
-    }
+    const std::string supported{
+        llvm::join(llvm::map_range(profile.cpus, [](const CpuMapping& cpu) { return cpu.mcpu; }), ", ")};
     return Fail(
         TranslationErrorKind::kUnsupportedCpu,
         kUnsupportedCpuMessage,
@@ -330,10 +323,18 @@ void CommandTranslation::AddDiagnostics() {
     Note(NoteKind::kAdded, {}, std::string{kErrorLimit}, kErrorLimitReason);
 }
 
+void CommandTranslation::AddHeaderPatches() {
+    for (const HeaderPatch& patch : toolchain_.profile().patches) {
+        llvm::SmallString<256> path{toolchain_.root()};
+        llvm::sys::path::append(path, kSfpiIncludeDirectory, patch.file);
+        Note(NoteKind::kPatchedHeader, std::string{path}, {}, patch.reason);
+    }
+}
+
 llvm::Expected<TranslationResult> CommandTranslation::Run() && {
     llvm::Expected<std::size_t> compiler_index{CompilerIndex(arguments())};
     if (!compiler_index) {
-        return compiler_index.takeError();
+        return Fail(TranslationErrorKind::kMalformedCommand, "{0}", llvm::toString(compiler_index.takeError()));
     }
     const std::span<const std::string> launcher{arguments().data(), *compiler_index};
     const std::string& compiler{arguments()[*compiler_index]};
@@ -349,7 +350,7 @@ llvm::Expected<TranslationResult> CommandTranslation::Run() && {
     result_.command.source_file = context_.command().source_file;
     result_.command.arguments.reserve(arguments().size() + 2 * toolchain_.profile().macro_overrides.size() + 24);
     if (!launcher.empty()) {
-        Note(NoteKind::kRemoved, JoinArguments(launcher), {}, kLauncherReason);
+        Note(NoteKind::kRemoved, llvm::join(launcher, " "), {}, kLauncherReason);
     }
     Note(NoteKind::kReplaced, compiler, std::string{kClangDriver}, kCompilerReplacedReason);
     Keep(kClangDriver);
@@ -368,9 +369,13 @@ llvm::Expected<TranslationResult> CommandTranslation::Run() && {
     if (!has_source_) {
         return Fail(TranslationErrorKind::kMalformedCommand, kMissingSourceMessage, context_.command().source_file);
     }
+    if (needs_cxx20_ && !translated_standard_) {
+        return Fail(TranslationErrorKind::kUnsupportedOption, kMissingStandardMessage, llvm::StringRef{kGccStandard});
+    }
     AddSystemIncludes();
     AddTypeModel();
     AddDiagnostics();
+    AddHeaderPatches();
     return std::move(result_);
 }
 

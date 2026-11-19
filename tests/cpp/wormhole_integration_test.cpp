@@ -103,6 +103,20 @@ std::size_t CountCalls(clang::ASTContext& context, std::string_view caller_name,
     return calls.size();
 }
 
+// Whether `function` builds an sfpi::vInt with the one-parameter constructor whose parameter type names `parameter`.
+bool ConstructsVIntFrom(clang::ASTContext& context, std::string_view function, std::string_view parameter) {
+    using namespace clang::ast_matchers;
+    const auto constructions{match(
+        cxxConstructExpr(
+            hasAncestor(functionDecl(hasName(std::string{function}))),
+            hasDeclaration(cxxConstructorDecl(ofClass(hasName("::sfpi::vInt")), parameterCountIs(1)).bind("ctor"))),
+        context)};
+    return std::any_of(constructions.begin(), constructions.end(), [parameter](const BoundNodes& nodes) {
+        const auto* constructor{nodes.getNodeAs<clang::CXXConstructorDecl>("ctor")};
+        return constructor->getParamDecl(0)->getType().getAsString().find(parameter) != std::string::npos;
+    });
+}
+
 class WormholeIntegrationTest : public ::testing::Test {
 protected:
     std::string sfpi_root_;
@@ -243,9 +257,12 @@ static_assert(std::is_same_v<std::uint_fast8_t, unsigned> && std::is_same_v<std:
 static_assert(INT_FAST8_MAX == 0x7fffffff && UINT_FAST16_MAX == 0xffffffffU);
 static_assert(std::is_same_v<std::size_t, unsigned> && std::is_same_v<std::intptr_t, int>);
 static_assert(!std::is_signed_v<char> && __riscv_xlen == 32 && __riscv_xtttensixwh == 1);
+static_assert(std::is_same_v<std::int_fast32_t, int> && std::is_same_v<std::uint_fast32_t, unsigned>);
 static_assert(__cplusplus == 202002L, "SFPI GCC keeps 201703L, a known difference");
 
 sfpi::vInt FromMagnitude(sfpi::vMag magnitude) { return magnitude; }
+sfpi::vInt FromUInt16(sfpi::vUInt16 value) { return value; }
+sfpi::vInt FromUInt8(sfpi::vUInt8 value) { return value; }
 )");
     const std::string compiler{Join(sfpi_root_, "compiler/bin/riscv-tt-elf-g++")};
     const Context context{
@@ -275,21 +292,11 @@ sfpi::vInt FromMagnitude(sfpi::vMag magnitude) { return magnitude; }
     ASSERT_TRUE(static_cast<bool>(ast)) << llvm::toString(ast.takeError());
     EXPECT_EQ(diagnostics.errors(), std::vector<std::string>{});
 
-    using namespace clang::ast_matchers;
-    const auto constructions{match(
-        cxxConstructExpr(
-            hasAncestor(functionDecl(hasName("FromMagnitude"))),
-            hasDeclaration(cxxConstructorDecl(ofClass(hasName("::sfpi::vInt")), parameterCountIs(1)).bind("ctor"))),
-        (*ast)->getASTContext())};
-    std::vector<std::string> parameters;
-    for (const BoundNodes& nodes : constructions) {
-        const auto* constructor{nodes.getNodeAs<clang::CXXConstructorDecl>("ctor")};
-        parameters.push_back(constructor->getParamDecl(0)->getType().getAsString());
-    }
-    const bool from_magnitude{std::any_of(parameters.begin(), parameters.end(), [](const std::string& parameter) {
-        return parameter.find("vMag") != std::string::npos;
-    })};
-    EXPECT_TRUE(from_magnitude) << ::testing::PrintToString(parameters);
+    // Overload ranking prefers the constructor taking the closest base: vUInt8 derives from vUInt16.
+    clang::ASTContext& ast_context{(*ast)->getASTContext()};
+    EXPECT_TRUE(ConstructsVIntFrom(ast_context, "FromMagnitude", "vMag"));
+    EXPECT_TRUE(ConstructsVIntFrom(ast_context, "FromUInt16", "vUInt16"));
+    EXPECT_TRUE(ConstructsVIntFrom(ast_context, "FromUInt8", "vUInt16"));
 }
 
 }  // namespace

@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -24,6 +25,7 @@
 #include "clang/Tooling/Tooling.h"
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/FormatVariadic.h"
@@ -128,7 +130,7 @@ public:
     std::unique_ptr<clang::FrontendAction> create() override { return std::make_unique<AstDumpAction>(filter_); }
 };
 
-llvm::Expected<std::vector<CompileCommand>> ReadCommands() {
+[[nodiscard]] llvm::Expected<std::vector<CompileCommand>> ReadCommands() {
     if (!jit_log_path.empty()) {
         llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> log{llvm::MemoryBuffer::getFile(jit_log_path)};
         if (!log) {
@@ -151,7 +153,7 @@ llvm::Expected<std::vector<CompileCommand>> ReadCommands() {
     return commands;
 }
 
-bool MatchesFilters(const Context& context, std::optional<tt::lint::ThreadRole> role) {
+[[nodiscard]] bool MatchesFilters(const Context& context, std::optional<tt::lint::ThreadRole> role) {
     const tt::lint::KernelId& kernel{context.kernel()};
     if (role && kernel.role != *role) {
         return false;
@@ -170,23 +172,33 @@ void PrintTranslation(const TranslationResult& translation) {
             case tt::lint::NoteKind::kAdded: llvm::outs() << "  + " << translated; break;
             case tt::lint::NoteKind::kRemoved: llvm::outs() << "  - " << original; break;
             case tt::lint::NoteKind::kReplaced: llvm::outs() << "  ~ " << original << " -> " << translated; break;
+            case tt::lint::NoteKind::kPatchedHeader:
+                llvm::outs() << "  ! " << original << " (patched in memory)";
+                break;
         }
         llvm::outs() << "\n      " << reason << "\n";
     }
 }
 
-// The toolchains already verified in this run, keyed by compiler path.
+// The toolchains already opened in this run, keyed by compiler path. A rejected toolchain is reported once.
 class ToolchainCache {
     std::map<std::string, SfpiToolchain, std::less<>> toolchains_;
+    std::set<std::string, std::less<>> rejected_;
 
 public:
-    llvm::Expected<const SfpiToolchain&> Get(std::string_view compiler) {
+    [[nodiscard]] llvm::Expected<const SfpiToolchain&> Get(std::string_view compiler) {
         if (const auto found = toolchains_.find(compiler); found != toolchains_.end()) {
             return found->second;
+        }
+        if (rejected_.contains(compiler)) {
+            return llvm::createStringError(
+                llvm::inconvertibleErrorCode(),
+                llvm::Twine{"the SFPI toolchain of '"} + compiler + "' was rejected above");
         }
         llvm::Expected<SfpiToolchain> toolchain{
             SfpiToolchain::OpenForCompiler(compiler, tt::lint::WormholeSfpiProfile(), *llvm::vfs::getRealFileSystem())};
         if (!toolchain) {
+            rejected_.emplace(compiler);
             return toolchain.takeError();
         }
         return toolchains_.emplace(std::string{compiler}, std::move(*toolchain)).first->second;
@@ -241,6 +253,11 @@ int main(int argc, const char** argv) {
         } else if (MatchesFilters(**context, role)) {
             contexts.push_back(std::move(**context));
         }
+    }
+
+    if (contexts.empty()) {
+        llvm::errs() << "error: no compute kernel context matches the input and the filters\n";
+        return EXIT_FAILURE;
     }
 
     const llvm::IntrusiveRefCntPtr<clang::DiagnosticOptions> diagnostic_options{new clang::DiagnosticOptions()};

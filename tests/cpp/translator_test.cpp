@@ -128,8 +128,8 @@ std::vector<std::string> WormholeMathArguments() {
 }
 
 bool HasNote(const TranslationResult& result, NoteKind kind, std::string_view text) {
-    for (const auto& [original, translated, reason, note_kind] : result.notes) {
-        if (note_kind == kind && (original == text || translated == text)) {
+    for (const TranslationNote& note : result.notes) {
+        if (note.kind == kind && (note.original == text || note.translated == text)) {
             return true;
         }
     }
@@ -205,6 +205,27 @@ TEST(TranslatorTest, TranslatesWormholeComputeCommand) {
     EXPECT_TRUE(HasNote(result, NoteKind::kRemoved, "-ftt-no-dyninit"));
     EXPECT_TRUE(HasNote(result, NoteKind::kRemoved, "-flto-partition=one"));
     EXPECT_TRUE(HasNote(result, NoteKind::kAdded, "-ferror-limit=0"));
+    EXPECT_TRUE(HasNote(result, NoteKind::kPatchedHeader, kSfpiHeader));
+}
+
+TEST(TranslatorTest, DropsFatalErrors) {
+    const SfpiToolchain toolchain{OpenTestToolchain()};
+    const Context context{MakeContext({kCompiler, "-Wfatal-errors", "-mcpu=tt-wh-tensix", "-c", kSource})};
+
+    const TranslationResult result{llvm::cantFail(TranslateSfpiCommand(context, toolchain))};
+
+    const std::vector<std::string>& arguments{result.command.arguments};
+    EXPECT_EQ(std::find(arguments.begin(), arguments.end(), "-Wfatal-errors"), arguments.end());
+    EXPECT_TRUE(HasNote(result, NoteKind::kRemoved, "-Wfatal-errors"));
+}
+
+TEST(TranslatorTest, NamesTheKernelInEveryError) {
+    const SfpiToolchain toolchain{OpenTestToolchain()};
+
+    llvm::Expected<TranslationResult> result{TranslateSfpiCommand(MakeContext({}), toolchain)};
+
+    ASSERT_FALSE(static_cast<bool>(result));
+    EXPECT_NE(llvm::toString(result.takeError()).find("kernel 'add_compute/abc123' (math)"), std::string::npos);
 }
 
 TEST(TranslatorTest, KeepsCxx17WithoutSfpiBackports) {
@@ -263,6 +284,7 @@ TEST(TranslatorTest, RejectsCommandsOutsideTheVerifiedSet) {
          TranslationErrorKind::kUnsupportedCompiler},
         {{"ccache", "sloppiness=pch_defines"}, TranslationErrorKind::kMalformedCommand},
         {{}, TranslationErrorKind::kMalformedCommand},
+        {{kCompiler, "-ftt-nttp", "-mcpu=tt-wh-tensix", "-c", kSource}, TranslationErrorKind::kUnsupportedOption},
     };
     for (const auto& [arguments, kind] : cases) {
         llvm::Expected<TranslationResult> result{TranslateSfpiCommand(MakeContext(arguments), toolchain)};

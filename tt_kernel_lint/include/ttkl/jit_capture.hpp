@@ -15,8 +15,10 @@ namespace tt::lint {
  * TT_LOGGER_LEVEL=info. A command logged more than once is returned once, in log order.
  *
  * @note TT-Metal joins argv with single spaces and no quoting, so an argument that contains a space cannot be
- * recovered. Such a command fails translation instead of being repaired by guesswork.
- * @return An error for a "compile cmd" line without the "-c -o <object> <source>" sequence that TT-Metal emits.
+ * recovered. A split quoted value is rejected here; any other split leaves a stray positional argument that fails
+ * translation. A split whose second half itself looks like an option is not detectable from the log.
+ * @return An error for a "compile cmd" line without the "-c -o <object> <source>" sequence that TT-Metal emits, or with
+ * an argument whose double quotes do not pair up.
  */
 [[nodiscard]] llvm::Expected<std::vector<CompileCommand>> ParseJitBuildLog(std::string_view log);
 

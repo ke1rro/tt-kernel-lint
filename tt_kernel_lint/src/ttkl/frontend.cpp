@@ -15,9 +15,10 @@
 #include "clang/Serialization/PCHContainerOperations.h"
 #include "clang/Tooling/Tooling.h"
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
-#include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/VirtualFileSystem.h"
+
+#include "error_util.hpp"
 
 namespace tt::lint {
 
@@ -27,15 +28,9 @@ constexpr const char* kOverlayMessage{"cannot overlay '{0}': the path is not abs
 constexpr const char* kWorkingDirectoryMessage{"cannot use '{0}' as the working directory: {1}"};
 constexpr const char* kClangFailedMessage{"Clang failed on '{0}' in '{1}'"};
 
-template <typename... Values>
-llvm::Error MakeError(const char* format, Values&&... values) {
-    return llvm::createStringError(
-        llvm::inconvertibleErrorCode(), llvm::formatv(format, std::forward<Values>(values)...).str());
-}
-
 // Private to one run, so concurrent runs never share a working directory. Overlays are copied, so they need not
 // outlive an AST that keeps the file system alive.
-llvm::Expected<llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem>> MakeFileSystem(
+[[nodiscard]] llvm::Expected<llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem>> MakeFileSystem(
     const std::string& working_directory, std::span<const FileOverlay> overlays) {
     auto in_memory{llvm::makeIntrusiveRefCnt<llvm::vfs::InMemoryFileSystem>()};
     for (const auto& [path, contents] : overlays) {

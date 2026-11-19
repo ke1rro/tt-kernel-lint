@@ -7,7 +7,9 @@ namespace tt::lint {
 
 /** How one SFPI `-mcpu=` value is spelled for Clang, and which SFPI GCC system headers it selects. */
 struct CpuMapping {
+    // only tt-wh-tensix temp
     std::string_view mcpu;
+    // riscv32-unknown-elf
     std::string_view triple;
     std::string_view march;
     std::string_view mabi;

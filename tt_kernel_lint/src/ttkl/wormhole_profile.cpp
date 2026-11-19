@@ -81,9 +81,10 @@ constexpr auto kSfpi7900Patches = std::to_array<HeaderPatch>({
         "#if __cplusplus >= 202002L\n"
         "  explicit operator vInt () const requires std::is_base_of_v<vUInt, Vector> = delete;\n"
         "#endif\n",
-        "Clang finds vInt(vMag) and the inherited vUInt::operator vInt() ambiguous for vMag, vUInt16 and vUInt8. SFPI "
-        "GCC selects the constructor, and the operator has no definition in SFPI 7.90.0. The explicit operator hides "
-        "the inherited one in vNarrow, so Clang selects the same constructor",
+        "Clang finds vInt(vMag) and the inherited vUInt::operator vInt() ambiguous for vMag, vUInt16 and vUInt8. "
+        "Standard overload resolution prefers the constructor, and SFPI GCC must select it: the operator has no "
+        "definition in SFPI 7.90.0. The explicit operator hides the inherited one in vNarrow, so Clang selects the "
+        "constructor too. Not yet checked against SFPI GCC output",
     },
 });
 

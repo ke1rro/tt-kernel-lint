@@ -84,6 +84,41 @@ TEST(JitCaptureTest, SkipsFirmwareAndDataMovementCommands) {
     }
 }
 
+TEST(JitCaptureTest, RejectsArgumentsSplitByTheLog) {
+    llvm::Expected<std::vector<CompileCommand>> commands{
+        ParseJitBuildLog(LogLine(std::string{kCompiler} + R"( -DCFG="a -Ifoo" -c -o )" + kObject + " " + kSource))};
+
+    ASSERT_FALSE(static_cast<bool>(commands));
+    EXPECT_NE(llvm::toString(commands.takeError()).find("unbalanced quote"), std::string::npos);
+}
+
+TEST(JitCaptureTest, KeepsTrailingArgumentsThatLookLikeALocation) {
+    const std::vector<CompileCommand> commands{llvm::cantFail(
+        ParseJitBuildLog(LogLine(std::string{kCompiler} + " -c -o " + kObject + " " + kSource + " -DLOC=(a:1)", "")))};
+
+    ASSERT_EQ(commands.size(), 1U);
+    EXPECT_EQ(commands.front().arguments.back(), "-DLOC=(a:1)");
+}
+
+TEST(JitCaptureTest, AppliesDefinesInCommandLineOrder) {
+    const std::vector<std::string> arguments{
+        kCompiler,
+        "-DCOMPILE_FOR_TRISC=0",
+        "-DUCK_CHLKC_PACK",
+        "-DCOMPILE_FOR_TRISC=1",
+        "-UUCK_CHLKC_PACK",
+        "-D",
+        "UCK_CHLKC_MATH",
+        "-DKERNEL_BUILD",
+        R"(-DFULL_KERNEL_NAME="k/42/")",
+    };
+
+    const std::optional<Context> context{llvm::cantFail(IdentifyComputeContext(MakeCommand(arguments)))};
+
+    ASSERT_TRUE(context.has_value());
+    EXPECT_EQ(context->kernel().role, ThreadRole::kMath);
+}
+
 TEST(JitCaptureTest, RejectsInconsistentComputeDefines) {
     const std::vector<std::vector<std::string>> inconsistent{
         {kCompiler, "-DUCK_CHLKC_PACK", "-DCOMPILE_FOR_TRISC=1", "-DKERNEL_BUILD", R"(-DFULL_KERNEL_NAME="k/42/")"},

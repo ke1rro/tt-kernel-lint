@@ -12,11 +12,12 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
-#include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/SHA256.h"
 #include "llvm/Support/VirtualFileSystem.h"
+
+#include "error_util.hpp"
 
 namespace tt::lint {
 
@@ -38,13 +39,7 @@ constexpr const char* kUnpinnedPatchMessage{"profile '{0}' patches '{1}', which 
 constexpr const char* kPatchMatchMessage{
     "profile '{0}': the patch for '{1}' must match exactly once, matched {2} times"};
 
-template <typename... Values>
-llvm::Error MakeError(const char* format, Values&&... values) {
-    return llvm::createStringError(
-        llvm::inconvertibleErrorCode(), llvm::formatv(format, std::forward<Values>(values)...).str());
-}
-
-std::string JoinPath(llvm::StringRef base, llvm::StringRef first, llvm::StringRef second = {}) {
+[[nodiscard]] std::string JoinPath(llvm::StringRef base, llvm::StringRef first, llvm::StringRef second = {}) {
     llvm::SmallString<256> path{base};
     llvm::sys::path::append(path, first);
     if (!second.empty()) {
@@ -53,12 +48,12 @@ std::string JoinPath(llvm::StringRef base, llvm::StringRef first, llvm::StringRe
     return std::string{path};
 }
 
-std::string Sha256Hex(llvm::StringRef contents) {
+[[nodiscard]] std::string Sha256Hex(llvm::StringRef contents) {
     const std::array<std::uint8_t, 32> digest{llvm::SHA256::hash(llvm::arrayRefFromStringRef(contents))};
     return llvm::toHex(digest, /*LowerCase=*/true);
 }
 
-bool IsPinned(const ToolchainProfile& profile, std::string_view file) {
+[[nodiscard]] bool IsPinned(const ToolchainProfile& profile, std::string_view file) {
     for (const HeaderDigest& header : profile.headers) {
         if (header.file == file) {
             return true;
@@ -68,7 +63,7 @@ bool IsPinned(const ToolchainProfile& profile, std::string_view file) {
 }
 
 // Applies every patch of `profile` that targets `file`; std::nullopt when none does.
-llvm::Expected<std::optional<std::string>> PatchHeader(
+[[nodiscard]] llvm::Expected<std::optional<std::string>> PatchHeader(
     const ToolchainProfile& profile, std::string_view file, llvm::StringRef contents) {
     std::optional<std::string> patched;
     for (const HeaderPatch& patch : profile.patches) {

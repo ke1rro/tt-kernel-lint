@@ -18,6 +18,8 @@ enum class NoteKind {
     kAdded,
     kRemoved,
     kReplaced,
+    // An SFPI header that Clang reads from memory, patched, instead of from disk.
+    kPatchedHeader,
 };
 
 /** One deliberate difference between the captured SFPI GCC command and the Clang command. */

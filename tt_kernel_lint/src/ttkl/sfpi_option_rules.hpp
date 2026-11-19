@@ -28,6 +28,7 @@ inline constexpr std::string_view kSystemInclude{"-isystem"};
 inline constexpr std::string_view kUndefinePrefix{"-U"};
 inline constexpr std::string_view kDefinePrefix{"-D"};
 inline constexpr std::string_view kErrorLimit{"-ferror-limit=0"};
+inline constexpr std::string_view kSfpiIncludeDirectory{"include"};
 
 inline constexpr std::string_view kLauncherReason{"compiler launcher, the analysis runs Clang in process"};
 inline constexpr std::string_view kDependencyFileReason{"writes a dependency file, the analysis produces no files"};
@@ -67,6 +68,7 @@ inline constexpr auto kDroppedFlags = std::to_array<OptionRule>({
     {"-mno-tt-fix-whbhebreak", "SFPI code generation option, no effect on parsing"},
     {"-fno-tree-loop-distribute-patterns", "GCC optimization option, no effect on parsing"},
     {"--param=min-pagesize=0", "GCC diagnostic heuristic, no effect on parsing"},
+    {"-Wfatal-errors", "stops Clang at the first error, the analysis keeps going"},
 });
 
 // Options removed when they start with the name, e.g. -flto=1 and -flto-partition=one.
@@ -108,7 +110,7 @@ inline constexpr auto kKeptFlags = std::to_array<std::string_view>({
 // Options whose value is the next argv element.
 inline constexpr auto kKeptWithOperand = std::to_array<std::string_view>({"-include", "-isystem", "-I", "-D", "-U"});
 
-// Joined spellings such as -DNAME=1, -I. and -Wall. Warning options do not change the AST.
+// Joined spellings such as -DNAME=1, -I., -Wall. Warning options do not change the AST.
 inline constexpr auto kKeptPrefixes = std::to_array<std::string_view>({"-D", "-U", "-I", "-W"});
 
 // -W prefixes that forward options to another tool, so the -W rule above must not keep them.
@@ -136,6 +138,8 @@ inline constexpr const char* kUnexpectedPositionalMessage{
     "unexpected positional argument '{0}', the source file is '{1}'"};
 inline constexpr const char* kRepeatedSourceMessage{"the source file is given more than once"};
 inline constexpr const char* kMissingSourceMessage{"the source file '{0}' is not on the command line"};
+inline constexpr const char* kMissingStandardMessage{
+    "the SFPI C++20 backports need {0}, which the verified Wormhole command set always passes"};
 inline constexpr const char* kMissingCompileMessage{"no -c option, the command does not compile a translation unit"};
 inline constexpr const char* kRepeatedCpuMessage{"more than one -mcpu option"};
 inline constexpr const char* kMissingCpuMessage{"no -mcpu option, the target cannot be determined"};
