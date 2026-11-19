@@ -49,14 +49,15 @@ jobs:
           chmod +x llvm.sh
           sudo ./llvm.sh 20
           rm llvm.sh
-          sudo apt-get install -y --no-install-recommends llvm-20-dev
+          sudo apt-get install -y --no-install-recommends llvm-20-dev libclang-20-dev
 
       - name: Configure CMake for clang-tidy
         run: |
           .venv/bin/python -m pip install cmake ninja
           PATH="$PWD/.venv/bin:$PATH" cmake -S . -B build -G Ninja \
             -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20 \
-            -DLLVM_DIR=/usr/lib/llvm-20/lib/cmake/llvm -DBUILD_KERNELS=OFF
+            -DLLVM_DIR=/usr/lib/llvm-20/lib/cmake/llvm \
+            -DClang_DIR=/usr/lib/llvm-20/lib/cmake/clang -DBUILD_KERNELS=OFF
 
       - name: Run pre-commit checks
         env:

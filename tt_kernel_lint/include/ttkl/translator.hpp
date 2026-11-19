@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -9,7 +10,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include "ttkl/compilation_ctx.hpp"
-#include "ttkl/target_profile.hpp"
+#include "ttkl/sfpi_toolchain.hpp"
 
 namespace tt::lint {
 
@@ -21,10 +22,10 @@ enum class NoteKind {
 
 /** One deliberate difference between the captured SFPI GCC command and the Clang command. */
 struct TranslationNote {
-    NoteKind kind{};
     std::string original;
     std::string translated;
     std::string reason;
+    NoteKind kind{};
 };
 
 /** A translated command together with the list of changes made to it. */
@@ -40,15 +41,15 @@ enum class TranslationErrorKind {
     kUnsupportedOption,
 };
 
-/** The command cannot be translated with the given profile. */
+/** The command cannot be translated with the given toolchain. */
 class TranslationError final : public llvm::ErrorInfo<TranslationError> {
-    TranslationErrorKind kind_;
     std::string message_;
+    TranslationErrorKind kind_;
 
 public:
     static char ID;
 
-    TranslationError(TranslationErrorKind kind, std::string message) : kind_(kind), message_(std::move(message)) {}
+    TranslationError(TranslationErrorKind kind, std::string message) : message_(std::move(message)), kind_(kind) {}
 
     [[nodiscard]] TranslationErrorKind kind() const noexcept { return kind_; }
 
@@ -57,11 +58,20 @@ public:
 };
 
 /**
- * Translates a captured SFPI GCC command into a Clang command. The input is not modified.
+ * Finds the SFPI GCC driver of a captured command, skipping a ccache launcher and its KEY=VALUE settings.
  *
- * Every option must be known: an option outside the verified Wormhole command set is an error, not a pass-through.
+ * @return A view into `command.arguments`.
+ */
+[[nodiscard]] llvm::Expected<std::string_view> FindSfpiCompiler(const CompileCommand& command);
+
+/**
+ * Translates a captured SFPI GCC command into a Clang command that parses the same translation unit.
+ *
+ * The input is not modified. Every option must be known: an option outside the verified Wormhole command set is an
+ * error, not a pass-through. The result is a syntax-only command; patched SFPI headers come from
+ * `toolchain.overlays()`.
  */
 [[nodiscard]] llvm::Expected<TranslationResult> TranslateSfpiCommand(
-    const Context& context, const ToolchainProfile& profile);
+    const Context& context, const SfpiToolchain& toolchain);
 
 }  // namespace tt::lint

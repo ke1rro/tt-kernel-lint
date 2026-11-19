@@ -1,6 +1,8 @@
 #pragma once
 
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -12,6 +14,26 @@ enum class ThreadRole {
     kMath = 1,
     kPack = 2,
 };
+
+/** Lowercase role name, as in the TT-Metal UCK_CHLKC_* defines. */
+[[nodiscard]] constexpr std::string_view ThreadRoleName(ThreadRole role) noexcept {
+    switch (role) {
+        case ThreadRole::kUnpack: return "unpack";
+        case ThreadRole::kMath: return "math";
+        case ThreadRole::kPack: return "pack";
+    }
+    return "unknown";
+}
+
+/** The role named by ThreadRoleName(), or std::nullopt for any other name. */
+[[nodiscard]] constexpr std::optional<ThreadRole> ParseThreadRole(std::string_view name) noexcept {
+    for (const ThreadRole role : {ThreadRole::kUnpack, ThreadRole::kMath, ThreadRole::kPack}) {
+        if (ThreadRoleName(role) == name) {
+            return role;
+        }
+    }
+    return std::nullopt;
+}
 
 /** One compiler invocation exactly as the TT-Metal JIT build ran it. */
 struct CompileCommand {
