@@ -3,6 +3,7 @@
 #include "clang/Tooling/Tooling.h"
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Analysis/CFG.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Casting.h"
 #include "clang/ASTMatchers/ASTMatchers.h"
@@ -10,9 +11,11 @@
 #include "clang/Index/USRGeneration.h"
 #include "clang/Basic/SourceLocation.h"
 #include "clang/Basic/SourceManager.h"
+#include <memory>
 #include <vector>
 #include <unordered_map>
 #include <string>
+#include <utility>
 
 using namespace clang::tooling;
 using namespace llvm;
@@ -53,13 +56,13 @@ struct BlockInfo {
 };
 
 using InfoMapping = std::unordered_map<unsigned, BlockInfo>;
-using FunctionToInfo = std::unordered_map<std::string, unsigned>;
+using FunctionToInfo = std::unordered_map<std::string, InfoMapping>;
 
 FunctionToInfo func_info_map;
 
 class OpInitCallPrinter : public MatchFinder::MatchCallback {
 public:
-    virtual void run(const MatchFinder::MatchResult& Result) {
+    virtual void run(const MatchFinder::MatchResult& Result) override {
         if (const auto FD = Result.Nodes.getNodeAs<clang::FunctionDecl>("function_declaration")) {
             if (FD->isInvalidDecl()) {
                 return;
@@ -79,9 +82,9 @@ public:
             }
 
             InfoMapping info_map;
-            for (const auto cfg_block : *cfg) {
+            for (const auto& cfg_block : *cfg) {
                 BlockInfo block_info;
-                for (const auto cfg_block_element : *cfg_block) {
+                for (const auto& cfg_block_element : *cfg_block) {
                     if (auto cfg_statement = cfg_block_element.getAs<clang::CFGStmt>()) {
                         if (auto call_expr = dyn_cast<clang::CallExpr>(cfg_statement->getStmt())) {
                             if (auto func_declaration = call_expr->getDirectCallee()) {
