@@ -13,8 +13,10 @@ find_package(Clang REQUIRED CONFIG)
 
 add_library(
   tt_kernel_lint_frontend STATIC
+  tt_kernel_lint/src/ttkl/capture.cpp
   tt_kernel_lint/src/ttkl/frontend.cpp
   tt_kernel_lint/src/ttkl/jit_capture.cpp
+  tt_kernel_lint/src/ttkl/sfpi_profile.cpp
   tt_kernel_lint/src/ttkl/sfpi_toolchain.cpp
   tt_kernel_lint/src/ttkl/translator.cpp
   tt_kernel_lint/src/ttkl/wormhole_profile.cpp)
