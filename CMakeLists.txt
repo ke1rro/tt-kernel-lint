@@ -40,6 +40,18 @@ endif()
 add_executable(tt-kernel-lint tt_kernel_lint/src/main.cpp)
 target_link_libraries(tt-kernel-lint PRIVATE tt_kernel_lint_frontend)
 
+add_library(tt_kernel_lint_analysis STATIC
+            tt_kernel_lint/src/ttkl/check/init_operation_pairing.cpp)
+target_link_libraries(
+  tt_kernel_lint_analysis PUBLIC tt_kernel_lint_frontend clangASTMatchers
+                                 clangAnalysis clangIndex)
+
+add_executable(tt-init-check tt_kernel_lint/tools/tt-init-check/main.cpp)
+target_link_libraries(tt-init-check PRIVATE tt_kernel_lint_analysis)
+target_compile_options(
+  tt-init-check
+  PRIVATE $<$<AND:$<CONFIG:Debug>,$<CXX_COMPILER_ID:Clang>>:-fstandalone-debug>)
+
 option(TTKL_BUILD_TESTS "Build the tt-kernel-lint GoogleTest suite" OFF)
 
 if(TTKL_BUILD_TESTS)
