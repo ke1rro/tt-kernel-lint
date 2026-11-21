@@ -59,11 +59,11 @@ if(TTKL_BUILD_TESTS)
   find_package(GTest REQUIRED)
   add_executable(
     tt_kernel_lint_tests
-    tests/cpp/capture_test.cpp tests/cpp/jit_capture_test.cpp
-    tests/cpp/translator_test.cpp tests/cpp/wormhole_integration_test.cpp)
-  target_link_libraries(
-    tt_kernel_lint_tests PRIVATE tt_kernel_lint_frontend clangASTMatchers
-                                 GTest::gtest_main)
+    tests/cpp/capture_test.cpp tests/cpp/init_operation_pairing_test.cpp
+    tests/cpp/jit_capture_test.cpp tests/cpp/translator_test.cpp
+    tests/cpp/wormhole_integration_test.cpp)
+  target_link_libraries(tt_kernel_lint_tests PRIVATE tt_kernel_lint_analysis
+                                                     GTest::gtest_main)
   target_compile_definitions(
     tt_kernel_lint_tests PRIVATE TTKL_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
   add_test(NAME tt_kernel_lint_tests COMMAND tt_kernel_lint_tests)
