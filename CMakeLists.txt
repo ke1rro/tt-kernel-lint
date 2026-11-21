@@ -21,20 +21,26 @@ target_include_directories(tt_kernel_lint_frontend SYSTEM
                            PUBLIC ${LLVM_INCLUDE_DIRS})
 target_link_libraries(tt_kernel_lint_frontend PUBLIC LLVMSupport)
 
-add_executable(
-  tt-kernel-init-static-check
-  clang-tidy/init_operation_pairing/LLKInitModule.hpp
-  clang-tidy/init_operation_pairing/LLKInitModule.cpp)
-target_include_directories(tt-kernel-init-static-check
-                           PRIVATE ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
-target_link_libraries(tt-kernel-init-static-check PRIVATE clang-cpp LLVM)
+add_library(tt_kernel_lint_analysis STATIC
+            tt_kernel_lint/src/ttkl/check/init_operation_pairing.cpp)
+target_include_directories(tt_kernel_lint_analysis
+                           PUBLIC tt_kernel_lint/include)
+target_include_directories(tt_kernel_lint_analysis SYSTEM
+                           PUBLIC ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
+target_link_libraries(tt_kernel_lint_analysis PUBLIC tt_kernel_lint_frontend
+                                                     clang-cpp LLVM)
+
+add_executable(tt-init-check tt_kernel_lint/tools/tt-init-check/main.cpp)
+target_link_libraries(tt-init-check PRIVATE tt_kernel_lint_analysis clang-cpp
+                                            LLVM)
 target_compile_options(
-  tt-kernel-init-static-check
+  tt-init-check
   PRIVATE $<$<AND:$<CONFIG:Debug>,$<CXX_COMPILER_ID:Clang>>:-fstandalone-debug>)
 
 if(NOT LLVM_ENABLE_RTTI)
   target_compile_options(tt_kernel_lint_frontend PRIVATE -fno-rtti)
-  target_compile_options(tt-kernel-init-static-check PRIVATE -fno-rtti)
+  target_compile_options(tt_kernel_lint_analysis PRIVATE -fno-rtti)
+  target_compile_options(tt-init-check PRIVATE -fno-rtti)
 endif()
 
 option(BUILD_KERNELS
