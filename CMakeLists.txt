@@ -11,8 +11,10 @@ set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 find_package(LLVM REQUIRED CONFIG)
 find_package(Clang REQUIRED CONFIG)
 
-add_library(tt_kernel_lint_frontend STATIC
-            tt_kernel_lint/src/ttkl/translator.cpp)
+add_library(
+  tt_kernel_lint_frontend STATIC
+  tt_kernel_lint/src/ttkl/capture.cpp tt_kernel_lint/src/ttkl/sfpi_profile.cpp
+  tt_kernel_lint/src/ttkl/translator.cpp)
 target_include_directories(tt_kernel_lint_frontend
                            PUBLIC tt_kernel_lint/include)
 target_include_directories(tt_kernel_lint_frontend SYSTEM
