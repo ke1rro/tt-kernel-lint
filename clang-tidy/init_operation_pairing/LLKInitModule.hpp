@@ -1,4 +1,0 @@
-namespace clang {
-
-
-} // namespace clang
