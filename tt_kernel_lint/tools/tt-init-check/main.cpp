@@ -9,6 +9,7 @@
 
 #include "clang/ASTMatchers/ASTMatchers.h"
 #include "clang/Tooling/Tooling.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Error.h"
@@ -25,6 +26,12 @@
 namespace {
 
 namespace cl = llvm::cl;
+
+// One finding and the contexts it came from: a kernel compiles once per TRISC role and compile-time variant.
+struct ReportedFinding {
+    tt::lint::Finding finding;
+    std::vector<std::string> contexts;
+};
 
 using clang::ast_matchers::functionDecl;
 using clang::ast_matchers::hasName;
@@ -86,6 +93,7 @@ int main(int argc, const char** argv) {
     }
 
     bool failed{false};
+    std::map<std::string, ReportedFinding> reported;
     std::map<std::string, tt::lint::SfpiToolchain, std::less<>> toolchains;
     const auto kernel_main_matcher = functionDecl(isDefinition(), hasName("kernel_main")).bind("function");
 
@@ -130,20 +138,31 @@ int main(int argc, const char** argv) {
             continue;
         }
 
-        for (const auto& [id, block] : checker.blocks()) {
-            llvm::outs() << context.kernel().name;
-            if (!context.kernel().variant.empty()) {
-                llvm::outs() << "/" << context.kernel().variant;
+        for (const std::string& error : checker.errors()) {
+            llvm::errs() << "tt-init-check: " << context.kernel().name << ": " << error << "\n";
+            failed = true;
+        }
+        const tt::lint::KernelId& kernel{context.kernel()};
+        const std::string label{
+            kernel.name + (kernel.variant.empty() ? "" : "/" + kernel.variant) + " " +
+            std::string{tt::lint::ThreadRoleName(kernel.role)}};
+        for (const tt::lint::Finding& finding : checker.findings()) {
+            const std::string key{
+                finding.call_site + '\x1f' + finding.operation + '\x1f' + finding.initializer + '\x1f' +
+                llvm::join(finding.active_initializers, ",")};
+            ReportedFinding& entry{reported[key]};
+            if (entry.contexts.empty()) {
+                entry.finding = finding;
             }
-            llvm::outs() << " [" << tt::lint::ThreadRoleName(context.kernel().role) << "]: block " << id << "\n";
-            for (const tt::lint::CallSite& call : block.calls) {
-                llvm::outs() << "  call " << call.name << " " << call.usr << " at " << call.call_site << "\n";
-            }
-            for (const tt::lint::CfgBlockId predecessor : block.predecessors) {
-                llvm::outs() << "  from block " << predecessor << "\n";
-            }
+            entry.contexts.push_back(label);
         }
     }
 
-    return failed ? 1 : 0;
+    for (const auto& entry : reported) {
+        const auto& [finding, contexts] = entry.second;
+        llvm::outs() << finding.call_site << ": " << finding.operation << " has no matching " << finding.initializer
+                     << " on every path (active: " << llvm::join(finding.active_initializers, ", ") << ") in "
+                     << llvm::join(contexts, ", ") << "\n";
+    }
+    return (failed || !reported.empty()) ? 1 : 0;
 }
