@@ -194,12 +194,12 @@ std::optional<ThreadRole> ParseRole(const std::vector<std::string>& arguments) {
         return std::nullopt;
     }
 
-    switch (index) {
-        case 0: return ThreadRole::kUnpack;
-        case 1: return ThreadRole::kMath;
-        case 2: return ThreadRole::kPack;
-        default: return std::nullopt;
+    for (const ThreadRoleEntry& entry : kThreadRoles) {
+        if (static_cast<unsigned>(entry.role) == index) {
+            return entry.role;
+        }
     }
+    return std::nullopt;
 }
 
 bool MatchesKernel(

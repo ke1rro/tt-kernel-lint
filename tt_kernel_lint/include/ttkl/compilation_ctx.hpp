@@ -1,6 +1,9 @@
 #pragma once
 
+#include <array>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -12,6 +15,35 @@ enum class ThreadRole {
     kMath = 1,
     kPack = 2,
 };
+
+struct ThreadRoleEntry {
+    ThreadRole role;
+    std::string_view name;
+};
+
+inline constexpr std::array<ThreadRoleEntry, 3> kThreadRoles{{
+    {ThreadRole::kUnpack, "unpack"},
+    {ThreadRole::kMath, "math"},
+    {ThreadRole::kPack, "pack"},
+}};
+
+[[nodiscard]] inline std::optional<ThreadRole> ParseThreadRole(std::string_view name) {
+    for (const ThreadRoleEntry& entry : kThreadRoles) {
+        if (entry.name == name) {
+            return entry.role;
+        }
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] inline std::string_view ThreadRoleName(ThreadRole role) {
+    for (const ThreadRoleEntry& entry : kThreadRoles) {
+        if (entry.role == role) {
+            return entry.name;
+        }
+    }
+    return "unknown";
+}
 
 /** One compiler invocation exactly as the TT-Metal JIT build ran it. */
 struct CompileCommand {
