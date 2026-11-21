@@ -256,6 +256,9 @@ An operation is reported when its initializer is absent on at least one path
 from `kernel_main`. The current rule table covers the common eltwise, matmul,
 copy, and block operations.
 
+Graph building and matching are described in
+[Kernel analysis](tt-init-check-analysis.md).
+
 `tt-init-check` uses `llvm::cl` for its command line. The available options
 are `--input-log`, `--kernel`, and `--role`; `--help` and `--version` are
 provided by LLVM.
