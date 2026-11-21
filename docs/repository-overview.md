@@ -1,22 +1,25 @@
 # Repository overview
 
-This document describes the repository at commit `afb527f` on `main`.
+This document describes the repository on `dev/ast_normalization` after the
+merge with `main`.
 
 ## What the repository is
 
-`tt-kernel-lint` is the foundation for a Clang-based checker for Tenstorrent
-kernels. The target checker must find kernel operations that have no matching
-initialization. The current `main` branch does **not** contain that checker.
+`tt-kernel-lint` is a Clang-based checker for Tenstorrent kernels. It finds
+kernel operations that have no matching initialization.
 
-`main` contains two implemented pieces:
+The repository contains three implemented pieces:
 
-1. A C++ library that translates a captured SFPI GCC command into a Clang
-   command.
-2. A Python pipeline that validates the SFPI SDK and replays a captured kernel
-   translation unit through Clang to produce an AST.
+1. A C++ library that captures a JIT compiler command, builds a real SFPI
+   profile, and translates the GCC command into a Clang command.
+2. An in-memory checker that passes the translated command directly to
+   `ClangTool`, builds the CFG, and reports operations with missing
+   initializers.
+3. A Python pipeline that validates the SFPI SDK and can replay a captured
+   kernel through Clang for AST inspection.
 
-The repository also contains an example TT-Metal program, tests for the Python
-tools, and formatting and CI configuration.
+No intermediate `compile_commands.json` is required by the checker. The JIT log
+is read, translated, and parsed in one process.
 
 ![Repository architecture](repository-architecture.png)
 
@@ -26,35 +29,39 @@ Diagram source: [repository-architecture.excalidraw](repository-architecture.exc
 
 | Path                                            | Role                                                                      |
 | ----------------------------------------------- | ------------------------------------------------------------------------- |
-| `CMakeLists.txt`                                | Builds the translator library; optionally builds the example kernel.      |
-| `tt_kernel_lint/include/ttkl/`                  | Public interfaces: compilation context, target profile, translator.       |
+| `CMakeLists.txt`                                | Builds the frontend library, analysis library, and checker.               |
+| `tt_kernel_lint/include/ttkl/`                  | Public interfaces: context, profile, capture, translator, checker.        |
+| `tt_kernel_lint/src/ttkl/capture.cpp`           | Parses `g++ compile cmd:` lines into `Context` objects.                   |
+| `tt_kernel_lint/src/ttkl/sfpi_profile.cpp`      | Derives target mapping and SFPI include paths from the captured compiler. |
 | `tt_kernel_lint/src/ttkl/translator.cpp`        | SFPI GCC to Clang command translation.                                    |
+| `tt_kernel_lint/src/ttkl/check/`                | CFG collection and init/operation pairing analysis.                       |
+| `tt_kernel_lint/tools/tt-init-check/main.cpp`   | Runs capture, translation, `ClangTool`, and reporting in one process.     |
 | `tt_kernel_lint/src/ttkl/sfpi_option_rules.hpp` | Internal tables of kept, dropped, and replaced command options.           |
 | `scripts/check_sfpi.py`                         | Verifies the SFPI 7.90.0 installation and creates a Clang-only overlay.   |
-| `scripts/parse_ast.py`                          | Selects a captured kernel context, runs Clang, and dumps the AST.         |
+| `scripts/parse_ast.py`                          | Debug path: selects a captured kernel context and dumps the AST.          |
 | `scripts/compat/`                               | Pinned SFPI manifest and Clang compatibility header.                      |
 | `example_kernel/main.cpp`                       | Host TT-Metal program that creates and runs three kernels.                |
 | `example_kernel/device/`                        | Reader, writer, and compute kernel sources.                               |
-| `tests/`                                        | Unit tests for `parse_ast.py`, `check_sfpi.py`, and the launcher scripts. |
+| `tests/`                                        | Unit tests for the Python tools and launcher scripts.                     |
 | `docs/jit-clang-ast-replay.md`                  | Step-by-step capture and AST replay guide.                                |
 | `jit_example.sh`                                | Builds the example and performs JIT preparation with or without a device. |
 | `run_example_kernel.sh`                         | Builds the example and executes it on device 0.                           |
 | `setup.sh`                                      | Creates the Python environment, installs hooks, and runs all hooks.       |
-| `tt-metal/`                                     | Git submodule for TT-Metal. It is not initialized in this checkout.       |
+| `tt-metal/`                                     | Git submodule for TT-Metal.                                               |
 
 ## Build system
 
-`CMakeLists.txt` requires CMake 4.0 and C++20. It finds LLVM through
-`find_package(LLVM REQUIRED CONFIG)` and builds one static library:
+`CMakeLists.txt` requires CMake 4.0 and C++20. It finds LLVM and Clang through
+`find_package` and builds three targets:
 
 ```text
-tt_kernel_lint_frontend
-  source: tt_kernel_lint/src/ttkl/translator.cpp
-  includes: tt_kernel_lint/include, LLVM_INCLUDE_DIRS
-  links: LLVMSupport
+tt_kernel_lint_frontend   static library: capture, profile, translator
+tt_kernel_lint_analysis   static library: CFG collection and pairing analysis
+tt-init-check             executable: in-memory JIT log to Clang pipeline
 ```
 
-The library has no executable driver on `main`.
+`tt_kernel_lint_frontend` links `LLVMSupport`. The analysis library and checker
+link `clang-cpp` and `LLVM`.
 
 `BUILD_KERNELS=OFF` is the default. With `BUILD_KERNELS=ON`, CMake adds the
 `tt-metal` subdirectory, builds `example_kernel`, links `TT::Metalium`, and
@@ -71,13 +78,12 @@ llvm::Expected<TranslationResult> TranslateSfpiCommand(
 
 The function consumes one raw SFPI invocation. It does not read
 `compile_commands.json`, select a kernel, or create `Context` or
-`ToolchainProfile`. No code on `main` calls it.
+`ToolchainProfile`. `tt-init-check` creates those values from the JIT log and
+calls the translator directly.
 
-The documented replay path uses TT-Metal's
-`scripts/build_kernel_clang_tidy_commands.py` instead. That script already
-translates each captured SFPI GCC command into a Clang command and writes a
-Clang-ready `compile_commands.json`. The C++ library is therefore an
-alternative implementation, not a stage in the current replay path.
+`ReadCaptureLog` parses `g++ compile cmd:` lines, recovers `KernelId` and
+`CompileCommand`, and filters by kernel and TRISC role. `MakeSfpiProfile`
+derives the CPU mapping and SFPI include paths from the captured compiler.
 
 Input types:
 
@@ -224,60 +230,95 @@ Additional tooling:
 - `docs/jit-clang-ast-replay.md` records the manual capture and replay
   procedure, including the SFPI Clang incompatibilities.
 
+## Component 6: In-memory checker
+
+`tt-init-check` is the production path:
+
+```bash
+tt-init-check --input-log CAPTURE/jit.log \
+  --kernel add_compute --role math
+```
+
+For each selected context it:
+
+1. Parses the raw SFPI command.
+2. Builds a `ToolchainProfile` from the captured compiler path and `-mcpu`.
+3. Calls `TranslateSfpiCommand`.
+4. Wraps the translated command in an in-memory `CompilationDatabase`.
+5. Runs `ClangTool` on that single command.
+6. Matches `kernel_main`, then builds a CFG for every function reachable from
+   it by direct calls.
+
+The analysis computes a summary for each reachable function: the initializers
+guaranteed on every exit, and every operation with the initializers guaranteed
+before it. A callee's guarantees enter the caller's state at the call site.
+An operation is reported when its initializer is absent on at least one path
+from `kernel_main`. The current rule table covers the common eltwise, matmul,
+copy, and block operations.
+
+`tt-init-check` uses `llvm::cl` for its command line. The available options
+are `--input-log`, `--kernel`, and `--role`; `--help` and `--version` are
+provided by LLVM.
+
+Exit status is `0` when no findings exist, `1` when a finding or analysis error
+exists, and `2` for invalid command-line usage.
+
 ## End-to-end data flow
 
-The documented replay path uses TT-Metal's converter:
+The production path stays in memory:
 
 ```text
 example_kernel/main.cpp
   -> TT-Metal JIT build
   -> SFPI GCC invocation per TRISC role
   -> jit.log ("g++ compile cmd: ...")
+  -> ReadCaptureLog
+  -> Context + MakeSfpiProfile
+  -> TranslateSfpiCommand
+  -> in-memory CompilationDatabase
+  -> ClangTool -> MatchFinder -> kernel_main
+  -> reachable function CFGs -> summaries -> findings
+```
+
+The Python replay path remains available for debugging:
+
+```text
+jit.log
   -> tt-metal build_kernel_clang_tidy_commands.py
   -> Clang-ready compile_commands.json
   -> parse_ast.py
   -> syntax check + AST dump
-  -> checker input (not implemented)
 ```
 
-The C++ translator is a separate path with no driver:
+`compile_commands.json` is no longer part of the checker path. It can still be
+generated for `parse_ast.py` or for inspecting translated commands.
 
-```text
-raw SFPI CompileCommand + ToolchainProfile
-  -> TranslateSfpiCommand
-  -> clang++ argv + TranslationNote[]
-```
+## What is missing
 
-The converter accepts either `--input-log` or a raw bear-captured
-`--input compile_commands.json`. It performs more work than the C++ library:
-target mapping, standard replacement, SFPI newlib and libstdc++ include paths,
-and `int32_t` type-model overrides.
+The checker is implemented, but these parts are still incomplete:
 
-## What is missing for the pairing checker
-
-`main` has no implementation of the requested check. These parts are absent:
-
-- A checker driver or `clang-tidy` module.
-- A model of operations, mandatory initializations, and pairing rules.
-- A path-sensitive analysis over the kernel control-flow graph.
-- Diagnostics and a report format.
-- A negative test kernel with a missing initialization.
-- A JSON entry reader and a factory for `Context` and `ToolchainProfile`.
-- Integration between the C++ translator and `parse_ast.py`; the replay path
-  currently uses the TT-Metal converter instead.
-- Initialized `tt-metal` submodule and a captured example run.
-- Tests for the translator library.
+- Pairing rules are a small hardcoded table. The `api_spec.yaml` data on
+  `origin/kernel-api` is not integrated.
+- Function pointers are not followed. A call to a function without a body is
+  opaque, so an initializer hidden behind it is not seen. Functions in system
+  headers are skipped.
+- The rule table does not yet cover every TT-Metal operation.
+- A committed negative test kernel with a missing initialization is absent.
+- C++ tests for the capture parser, translator, and analysis core are absent.
+- A captured example run and a full end-to-end test on Linux CI are absent.
+- `tt-metal` is initialized, but SFPI is not installed in this environment.
 
 ## Related branches
 
-These branches contain checker-related work but are not merged into `main`.
-They also predate the current translator and replay tooling.
+These branches contain checker-related work. `dev/ast_normalization` is now
+merged into the current branch and its prototype has been replaced by
+`tt-init-check`.
 
-| Branch                         | Contents                                                                                                                                                                                                       | State                                                  |
-| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| `origin/kernel-api`            | `specs/api_spec.yaml` with 98 instruction records, `scripts/generate_rules_db.py`, generated `ttkl/kernel_api/{common,rule,rules_db}.h`, and a specification guide.                                            | Rule data and generator; no checker.                   |
-| `origin/dev/ast_normalization` | A `clang-tidy` prototype at `clang-tidy/init_operation_pairing/LLKInitModule.cpp`. It matches `kernel_main`, builds its CFG, and records callee USR, name, definition site, call site, and predecessor blocks. | Call collection only; no pairing logic or diagnostics. |
-| `origin/wip/ast-parse`         | Historical branch with the same tree content as `main`.                                                                                                                                                        | Superseded.                                            |
+| Branch                         | Contents                                                                                                                                                            | State                                                       |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `origin/kernel-api`            | `specs/api_spec.yaml` with 98 instruction records, `scripts/generate_rules_db.py`, generated `ttkl/kernel_api/{common,rule,rules_db}.h`, and a specification guide. | Rule data and generator; not integrated with the checker.   |
+| `origin/dev/ast_normalization` | Historical prototype. The original `clang-tidy` directory matched `kernel_main`, built its CFG, and collected direct calls.                                         | Merged; superseded by `tt_kernel_lint/tools/tt-init-check`. |
+| `origin/wip/ast-parse`         | Historical branch with the same tree content as `main`.                                                                                                             | Superseded.                                                 |
 
 ## Quick commands
 
@@ -285,8 +326,10 @@ The launcher scripts target Linux and expect Clang and LLVM 20 under
 `/usr/lib/llvm-20`. Adjust the paths on other systems.
 
 ```bash
-# Configure and build the translator library
-cmake -S . -B build -G Ninja -DLLVM_DIR=/usr/lib/llvm-20/lib/cmake/llvm
+# Configure and build the frontend, analysis library, and checker
+cmake -S . -B build -G Ninja \
+  -DLLVM_DIR=/usr/lib/llvm-20/lib/cmake/llvm \
+  -DClang_DIR=/usr/lib/llvm-20/lib/cmake/clang
 cmake --build build
 
 # Create the Python environment
@@ -295,7 +338,13 @@ cmake --build build
 # Verify SFPI and create a Clang overlay
 python3 scripts/check_sfpi.py --output-dir /path/to/sfpi-clang
 
-# Replay a captured MATH kernel
+# Run the in-memory checker
+./build/tt-init-check \
+  --input-log /path/to/capture/jit.log \
+  --kernel add_compute \
+  --role math
+
+# Debug path: dump the AST
 python3 scripts/parse_ast.py \
   --capture /path/to/capture \
   --kernel add_compute \

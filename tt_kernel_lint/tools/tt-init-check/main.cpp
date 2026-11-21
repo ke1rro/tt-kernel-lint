@@ -109,6 +109,7 @@ int main(int argc, const char** argv) {
     }
 
     bool failed = false;
+    bool found = false;
 
     for (const tt::lint::Context& context : *contexts) {
         const std::optional<std::string> mcpu = FindMcpu(context.command().arguments);
@@ -153,20 +154,16 @@ int main(int argc, const char** argv) {
             continue;
         }
 
-        for (const auto& [id, block] : checker.blocks()) {
+        for (const tt::lint::Finding& finding : checker.findings()) {
+            found = true;
             llvm::outs() << context.kernel().name;
             if (!context.kernel().variant.empty()) {
                 llvm::outs() << "/" << context.kernel().variant;
             }
-            llvm::outs() << " [" << tt::lint::ThreadRoleName(context.kernel().role) << "]: block " << id << "\n";
-            for (const tt::lint::CallSite& call : block.calls) {
-                llvm::outs() << "  call " << call.name << " " << call.usr << " at " << call.call_site << "\n";
-            }
-            for (const unsigned predecessor : block.predecessors) {
-                llvm::outs() << "  from block " << predecessor << "\n";
-            }
+            llvm::outs() << " [" << tt::lint::ThreadRoleName(context.kernel().role) << "]: " << finding.operation
+                         << " at " << finding.call_site << " has no matching " << finding.initializer << "\n";
         }
     }
 
-    return failed ? 1 : 0;
+    return (failed || found) ? 1 : 0;
 }

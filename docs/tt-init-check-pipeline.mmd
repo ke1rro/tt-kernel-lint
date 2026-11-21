@@ -1,0 +1,28 @@
+flowchart TB
+  subgraph JIT["1. JIT capture"]
+    A["example_kernel/main.cpp"] --> B["TT-Metal JIT build"]
+    B --> C["SFPI GCC per TRISC role"]
+    C --> D["jit.log<br/>g++ compile cmd: ..."]
+    B --> E["generated files on disk<br/>chlkc_*.cpp<br/>defines_generated.h"]
+  end
+
+  subgraph CONVERT["2. In-process conversion"]
+    D --> F["capture reader<br/>argv + -D macros"]
+    F --> G["Context<br/>KernelId + CompileCommand"]
+    G --> H["TranslateSfpiCommand<br/>ToolchainProfile"]
+    H --> I["TranslationResult<br/>clang++ argv + notes"]
+  end
+
+  subgraph CHECK["3. Clang checker"]
+    I --> J["InMemoryCompilationDatabase"]
+    J --> K["ClangTool<br/>one entry per kernel/role"]
+    K --> L["FrontendAction<br/>MatchFinder"]
+    L --> M["match kernel_main"]
+    M --> N["CFG::buildCFG"]
+    N --> O["collect call sites<br/>+ predecessor blocks"]
+    O --> P["load init/op rules"]
+    P --> Q["must-analysis over CFG"]
+    Q --> R["diagnostics<br/>operation + missing init + call site"]
+  end
+
+  E -.-> K
