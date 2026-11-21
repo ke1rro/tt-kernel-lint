@@ -23,17 +23,30 @@ struct CfgBlock {
     std::vector<unsigned> predecessors;
 };
 
+/** One operation with a missing initializer. */
+struct Finding {
+    std::string operation;
+    std::string initializer;
+    std::string call_site;
+};
+
 /**
- * Collects direct calls from kernel_main and builds the normalized call graph.
+ * Collects direct calls from kernel_main and checks that every known operation
+ * has its matching initializer on every incoming path.
  */
 class InitOperationPairing final : public clang::ast_matchers::MatchFinder::MatchCallback {
 public:
     void run(const clang::ast_matchers::MatchFinder::MatchResult& result) override;
 
     [[nodiscard]] const std::unordered_map<unsigned, CfgBlock>& blocks() const noexcept { return blocks_; }
+    [[nodiscard]] const std::vector<Finding>& findings() const noexcept { return findings_; }
 
 private:
+    void Analyze();
+
     std::unordered_map<unsigned, CfgBlock> blocks_;
+    std::vector<Finding> findings_;
+    unsigned entry_block_{};
 };
 
 }  // namespace tt::lint
