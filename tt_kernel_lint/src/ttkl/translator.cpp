@@ -250,6 +250,15 @@ llvm::Expected<TranslationResult> CommandTranslation::Run() && {
     if (!has_source_) {
         return Fail(TranslationErrorKind::kMalformedCommand, kMissingSourceMessage, context_.command().source_file);
     }
+
+    for (const std::string& flag : profile_.clang_flags) {
+        Keep(flag);
+    }
+    for (const std::string& directory : profile_.system_include_directories) {
+        Keep("-isystem");
+        Keep(directory);
+    }
+
     return std::move(result_);
 }
 
