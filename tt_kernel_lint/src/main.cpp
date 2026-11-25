@@ -34,6 +34,7 @@
 #include "llvm/Support/VirtualFileSystem.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include "ttkl/capture.hpp"
 #include "ttkl/compilation_ctx.hpp"
 #include "ttkl/frontend.hpp"
 #include "ttkl/jit_capture.hpp"
@@ -153,14 +154,6 @@ public:
     return commands;
 }
 
-[[nodiscard]] bool MatchesFilters(const Context& context, std::optional<tt::lint::ThreadRole> role) {
-    const tt::lint::KernelId& kernel{context.kernel()};
-    if (role && kernel.role != *role) {
-        return false;
-    }
-    return kernel_filter.empty() || kernel_filter == kernel.name || kernel_filter == kernel.name + "/" + kernel.variant;
-}
-
 void PrintTranslation(const TranslationResult& translation) {
     llvm::outs() << "  directory: " << translation.command.directory << "\n  command:";
     for (const std::string& argument : translation.command.arguments) {
@@ -240,6 +233,7 @@ int main(int argc, const char** argv) {
         return EXIT_FAILURE;
     }
 
+    const tt::lint::CaptureFilter filter{kernel_filter.getValue(), role};
     std::size_t skipped{0};
     std::size_t failed{0};
     std::vector<Context> contexts;
@@ -250,7 +244,7 @@ int main(int argc, const char** argv) {
             ++failed;
         } else if (!*context) {
             ++skipped;
-        } else if (MatchesFilters(**context, role)) {
+        } else if (tt::lint::MatchesCaptureFilter((**context).kernel(), filter)) {
             contexts.push_back(std::move(**context));
         }
     }

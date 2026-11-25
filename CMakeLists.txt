@@ -16,7 +16,6 @@ add_library(
   tt_kernel_lint/src/ttkl/capture.cpp
   tt_kernel_lint/src/ttkl/frontend.cpp
   tt_kernel_lint/src/ttkl/jit_capture.cpp
-  tt_kernel_lint/src/ttkl/sfpi_profile.cpp
   tt_kernel_lint/src/ttkl/sfpi_toolchain.cpp
   tt_kernel_lint/src/ttkl/translator.cpp
   tt_kernel_lint/src/ttkl/wormhole_profile.cpp)
@@ -48,8 +47,8 @@ if(TTKL_BUILD_TESTS)
   find_package(GTest REQUIRED)
   add_executable(
     tt_kernel_lint_tests
-    tests/cpp/jit_capture_test.cpp tests/cpp/translator_test.cpp
-    tests/cpp/wormhole_integration_test.cpp)
+    tests/cpp/capture_test.cpp tests/cpp/jit_capture_test.cpp
+    tests/cpp/translator_test.cpp tests/cpp/wormhole_integration_test.cpp)
   target_link_libraries(
     tt_kernel_lint_tests PRIVATE tt_kernel_lint_frontend clangASTMatchers
                                  GTest::gtest_main)
