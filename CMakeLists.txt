@@ -9,17 +9,51 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 find_package(LLVM REQUIRED CONFIG)
+find_package(Clang REQUIRED CONFIG)
 
-add_library(tt_kernel_lint_frontend STATIC
-            tt_kernel_lint/src/ttkl/translator.cpp)
+add_library(
+  tt_kernel_lint_frontend STATIC
+  tt_kernel_lint/src/ttkl/frontend.cpp
+  tt_kernel_lint/src/ttkl/jit_capture.cpp
+  tt_kernel_lint/src/ttkl/sfpi_toolchain.cpp
+  tt_kernel_lint/src/ttkl/translator.cpp
+  tt_kernel_lint/src/ttkl/wormhole_profile.cpp)
 target_include_directories(tt_kernel_lint_frontend
                            PUBLIC tt_kernel_lint/include)
 target_include_directories(tt_kernel_lint_frontend SYSTEM
-                           PUBLIC ${LLVM_INCLUDE_DIRS})
-target_link_libraries(tt_kernel_lint_frontend PUBLIC LLVMSupport)
+                           PUBLIC ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
+target_link_libraries(
+  tt_kernel_lint_frontend
+  PUBLIC clangTooling
+         clangFrontend
+         clangDriver
+         clangSerialization
+         clangAST
+         clangBasic
+         LLVMSupport)
 
 if(NOT LLVM_ENABLE_RTTI)
-  target_compile_options(tt_kernel_lint_frontend PRIVATE -fno-rtti)
+  target_compile_options(tt_kernel_lint_frontend PUBLIC -fno-rtti)
+endif()
+
+add_executable(tt-kernel-lint tt_kernel_lint/src/main.cpp)
+target_link_libraries(tt-kernel-lint PRIVATE tt_kernel_lint_frontend)
+
+option(TTKL_BUILD_TESTS "Build the tt-kernel-lint GoogleTest suite" OFF)
+
+if(TTKL_BUILD_TESTS)
+  enable_testing()
+  find_package(GTest REQUIRED)
+  add_executable(
+    tt_kernel_lint_tests
+    tests/cpp/jit_capture_test.cpp tests/cpp/translator_test.cpp
+    tests/cpp/wormhole_integration_test.cpp)
+  target_link_libraries(
+    tt_kernel_lint_tests PRIVATE tt_kernel_lint_frontend clangASTMatchers
+                                 GTest::gtest_main)
+  target_compile_definitions(
+    tt_kernel_lint_tests PRIVATE TTKL_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+  add_test(NAME tt_kernel_lint_tests COMMAND tt_kernel_lint_tests)
 endif()
 
 option(BUILD_KERNELS
