@@ -40,6 +40,18 @@ endif()
 add_executable(tt-kernel-lint tt_kernel_lint/src/main.cpp)
 target_link_libraries(tt-kernel-lint PRIVATE tt_kernel_lint_frontend)
 
+add_library(tt_kernel_lint_analysis STATIC
+            tt_kernel_lint/src/ttkl/check/init_operation_pairing.cpp)
+target_link_libraries(
+  tt_kernel_lint_analysis PUBLIC tt_kernel_lint_frontend clangASTMatchers
+                                 clangAnalysis clangIndex)
+
+add_executable(tt-init-check tt_kernel_lint/tools/tt-init-check/main.cpp)
+target_link_libraries(tt-init-check PRIVATE tt_kernel_lint_analysis)
+target_compile_options(
+  tt-init-check
+  PRIVATE $<$<AND:$<CONFIG:Debug>,$<CXX_COMPILER_ID:Clang>>:-fstandalone-debug>)
+
 option(TTKL_BUILD_TESTS "Build the tt-kernel-lint GoogleTest suite" OFF)
 
 if(TTKL_BUILD_TESTS)
@@ -47,11 +59,11 @@ if(TTKL_BUILD_TESTS)
   find_package(GTest REQUIRED)
   add_executable(
     tt_kernel_lint_tests
-    tests/cpp/capture_test.cpp tests/cpp/jit_capture_test.cpp
-    tests/cpp/translator_test.cpp tests/cpp/wormhole_integration_test.cpp)
-  target_link_libraries(
-    tt_kernel_lint_tests PRIVATE tt_kernel_lint_frontend clangASTMatchers
-                                 GTest::gtest_main)
+    tests/cpp/capture_test.cpp tests/cpp/init_operation_pairing_test.cpp
+    tests/cpp/jit_capture_test.cpp tests/cpp/translator_test.cpp
+    tests/cpp/wormhole_integration_test.cpp)
+  target_link_libraries(tt_kernel_lint_tests PRIVATE tt_kernel_lint_analysis
+                                                     GTest::gtest_main)
   target_compile_definitions(
     tt_kernel_lint_tests PRIVATE TTKL_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
   add_test(NAME tt_kernel_lint_tests COMMAND tt_kernel_lint_tests)
