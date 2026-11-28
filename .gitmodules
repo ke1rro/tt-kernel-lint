@@ -1,3 +1,6 @@
 [submodule "tt-metal"]
 	path = tt-metal
 	url = https://github.com/tenstorrent/tt-metal
+[submodule "ttsim"]
+	path = ttsim
+	url = https://github.com/tenstorrent/ttsim.git
