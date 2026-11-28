@@ -1,4 +1,5 @@
 #include <cmath>
+#include <iomanip>
 #include <iostream>
 #include <string_view>
 #include <utility>
@@ -25,12 +26,28 @@ struct Params {
     static constexpr std::uint32_t size_of_tile = sizeof(bfloat16) * elems_per_tile;
 };
 
-std::vector<bfloat16> generate_data(float a, float b) {
+std::vector<bfloat16> generate_data(const float a, const float b) {
     std::mt19937 rng{0};
     std::uniform_real_distribution<float> dist(a, b);
     std::vector<bfloat16> data(Params::elems_per_tile);
     std::generate(data.begin(), data.end(), [&] { return bfloat16(dist(rng)); });
     return data;
+}
+
+void print_preview(std::string_view label, const std::vector<bfloat16>& data) {
+    constexpr std::size_t preview_size = 32;
+    constexpr std::size_t columns = 8;
+    const auto flags = std::cout.flags();
+    const auto precision = std::cout.precision();
+    std::cout << label << " (first 32 elements)\n" << std::fixed << std::setprecision(4);
+    for (std::size_t i = 0; i < std::min(preview_size, data.size()); ++i) {
+        std::cout << std::setw(9) << static_cast<float>(data[i]);
+        if ((i + 1) % columns == 0) {
+            std::cout << '\n';
+        }
+    }
+    std::cout.flags(flags);
+    std::cout.precision(precision);
 }
 
 // Add two tiled matrices.
@@ -62,7 +79,6 @@ int main(int argc, char** argv) {
     if (mock) {
         experimental::configure_mock_mode(tt::ARCH::WORMHOLE_B0, 1);
     }
-    bool pass{true};
     constexpr float value_to_add_to_matrix_A{1.0F};
     constexpr CoreCoord core = {0, 0};
     constexpr int device_id{0};
@@ -158,8 +174,17 @@ int main(int argc, char** argv) {
     if (compile_only) {
         experimental::program_preparation::prepare(*mesh_device, workload);
         std::cout << (mock ? "JIT without device completed" : "JIT with device completed") << '\n';
-        return mesh_device->close() ? 0 : 1;
+        if (!mesh_device->close()) {
+            std::cerr << "Device close failed.\n";
+            return 1;
+        }
+        return 0;
     }
+
+    // These samples stay in tile-buffer order.
+    print_preview("A", a_data);
+    print_preview("B", b_data);
+    std::cout << std::flush;
 
     auto& command_queue = mesh_device->mesh_command_queue();
     distributed::EnqueueWriteMeshBuffer(command_queue, src0_dram_buffer, a_data, false);
@@ -171,28 +196,43 @@ int main(int argc, char** argv) {
     distributed::EnqueueReadMeshBuffer(command_queue, result_vec, dst_dram_buffer, true);
 
     if (result_vec.size() != a_data.size()) {
-        mesh_device->close();
+        std::cerr << "Readback size error: expected " << a_data.size() << " elements, got " << result_vec.size()
+                  << ".\n";
+        if (!mesh_device->close()) {
+            std::cerr << "Device close failed.\n";
+        }
         return 1;
     }
+    print_preview("A + B", result_vec);
     constexpr float eps = 1e-2f;
+    constexpr std::size_t mismatch_detail_limit = 4;
+    std::size_t mismatch_count = 0;
 
     for (size_t i{}; i < result_vec.size(); ++i) {
-        const float expected = static_cast<float>(a_data[i]) + value_to_add_to_matrix_A;
+        const float expected = static_cast<float>(a_data[i]) + static_cast<float>(b_data[i]);
         const float actual = static_cast<float>(result_vec[i]);
 
-        if (!std::isfinite(actual) || std::abs(expected - actual) > eps) {
-            pass = false;
-            std::cout << "Result mismatch at index: " << i << " expected: " << expected << " got: " << actual << '\n';
+        if (!std::isfinite(expected) || !std::isfinite(actual) || std::abs(expected - actual) > eps) {
+            ++mismatch_count;
+            if (mismatch_count <= mismatch_detail_limit) {
+                std::cout << "Result mismatch at index: " << i << " expected: " << expected << " got: " << actual
+                          << '\n';
+            }
         }
     }
 
-    pass = mesh_device->close() && pass;
-
-    if (pass) {
-        std::cout << "Passed!\n";
+    const bool closed = mesh_device->close();
+    if (!closed) {
+        std::cerr << "Device close failed.\n";
+    }
+    if (mismatch_count == 0 && closed) {
+        std::cout << "Checked " << result_vec.size() << " elements: Passed!\n";
+    } else if (mismatch_count == 0) {
+        std::cout << "Checked " << result_vec.size() << " elements: Failed (device close failed).\n";
     } else {
-        std::cout << "Failed!\n";
+        std::cout << "Checked " << result_vec.size() << " elements: Failed (" << mismatch_count
+                  << " mismatches; showing first " << std::min(mismatch_count, mismatch_detail_limit) << ").\n";
     }
 
-    return pass ? 0 : 1;
+    return mismatch_count == 0 && closed ? 0 : 1;
 }
