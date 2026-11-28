@@ -69,6 +69,11 @@ if(TTKL_BUILD_TESTS)
   add_test(NAME tt_kernel_lint_tests COMMAND tt_kernel_lint_tests)
 endif()
 
+add_library(tt_kernel_lint_kernel_api INTERFACE)
+target_include_directories(tt_kernel_lint_kernel_api
+                           INTERFACE tt_kernel_lint/include)
+target_link_libraries(${PROJECT_NAME} PRIVATE tt_kernel_lint_kernel_api)
+
 option(BUILD_KERNELS
        "Build the Metalium host example and its runtime dependencies" OFF)
 

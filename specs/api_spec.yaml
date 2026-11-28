@@ -1,0 +1,5303 @@
+# Tenstorrent Kernel API Static-Analysis Specification (Explicit EXU State Machine)
+# Ground-truth verified directly against tt-metal/tt_metal/hw/inc/ headers.
+#
+# State model tracked by the analyzer at every CFG point:
+#   EXUs:      compute: unpack, fpu, sfpu, pack, sfpu_pack | dm: noc_rd_state, noc_wr_state, noc_inline_state
+#              Each EXU holds {mode, dirty, bound_args}. Initial: uninit (compute) / idle (dm).
+#              Meta-requirements in `require`:
+#                uninit  -> mode == uninit (before hw startup)
+#                started -> mode != uninit (any active mode, clean or dirty)
+#                clean   -> mode != uninit && !dirty (safe to seat a new init)
+#                <mode>  -> mode == <mode> (or in list of allowed modes)
+#              Transitions: `set` writes new mode (resets dirty=false unless `dirty: true`).
+#              Any EXU with dirty=true must be reset to `idle` via `uninit` before switching or exit.
+#   Resources: dst_math, dst_pack (free|held) | dest_acc (default|overridden)
+#              cb_in (idle|ready, per CB) | cb_out (idle|reserved, per CB)
+#              noc_rd, noc_wr, noc_atomic (idle|in_flight, per noc/trid)
+#
+# Entry fields (optional fields omitted when default/empty):
+#   kind:         startup | cleanup | reconfig | init | op | uninit | acquire | release
+#   threads:      [unpack | math | pack | dm]
+#   exu:          {unit: {require, set, dirty}}
+#   resources:    {resource: {require, set}}
+#   uninit:       uninit command(s) required when any EXU is marked dirty: true
+#   pair:         partner acquire/release command(s) for lifecycle diagnostics
+#   args / targs: {semantic_role: arg_index} for argument consistency across init/op/uninit
+#   stateful:     true for SFPU inits writing persistent LREG/replay state
+#   in_loop:      false if unsafe inside loops
+#   arch:         subset of [wh, bh, quasar] when not available on all 3
+#   deprecated:   true if [[deprecated]] in tt-metal
+#   experimental: true if defined under api/compute/experimental/
+#   header:       defining header relative to tt-metal/tt_metal/hw/inc/
+
+version: '2.1'
+tt_metal_commit: '07fac6de536'
+
+instructions:
+  # === Startup, Cleanup & Dest Accumulation (8) ===
+  compute_kernel_hw_startup:
+    kind: startup
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: uninit, set: idle}
+      fpu: {require: uninit, set: idle}
+      sfpu: {require: uninit, set: idle}
+      pack: {require: uninit, set: idle}
+      sfpu_pack: {require: uninit, set: idle}
+    resources: {dst_math: {require: free}, dst_pack: {require: free}}
+    args: {icb0: 0, icb1: 1, ocb: 2}
+    targs: {src_order: 0}
+    in_loop: false
+    header: api/compute/compute_kernel_hw_startup.h
+  unary_op_init_common:
+    kind: startup
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: uninit, set: copy}
+      fpu: {require: uninit, set: copy}
+      sfpu: {require: uninit, set: idle}
+      pack: {require: uninit, set: idle}
+      sfpu_pack: {require: uninit, set: idle}
+    resources: {dst_math: {require: free}, dst_pack: {require: free}}
+    args: {icb0: 0, ocb: 1}
+    in_loop: false
+    deprecated: true
+    header: api/compute/eltwise_unary/eltwise_unary.h
+  init_sfpu:
+    kind: startup
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: uninit, set: copy}
+      fpu: {require: uninit, set: copy}
+      sfpu: {require: uninit, set: idle}
+      pack: {require: uninit, set: idle}
+      sfpu_pack: {require: uninit, set: idle}
+    resources: {dst_math: {require: free}, dst_pack: {require: free}}
+    args: {icb0: 0, ocb: 1}
+    in_loop: false
+    deprecated: true
+    header: api/compute/eltwise_unary/eltwise_unary.h
+  compute_kernel_hw_cleanup:
+    kind: cleanup
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: started, set: idle}
+      fpu: {require: started, set: idle}
+      sfpu: {require: started, set: idle}
+      pack: {require: started, set: uninit}
+      sfpu_pack: {require: started, set: idle}
+    resources: {dst_math: {require: free}, dst_pack: {require: free}}
+    in_loop: false
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/compute_kernel_hw_cleanup.h
+  enable_fp32_dest_acc:
+    kind: acquire
+    threads: [unpack, math, pack]
+    exu: {unpack: {require: started}, fpu: {require: started}, pack: {require: started}}
+    resources:
+      dst_math: {require: free}
+      dst_pack: {require: free}
+      dest_acc: {require: default, set: overridden}
+    pair: disable_fp32_dest_acc
+    arch: [wh, bh]
+    header: api/compute/compute_kernel_hw_startup.h
+  disable_fp32_dest_acc:
+    kind: release
+    threads: [unpack, math, pack]
+    exu: {unpack: {require: started}, fpu: {require: started}, pack: {require: started}}
+    resources:
+      dst_math: {require: free}
+      dst_pack: {require: free}
+      dest_acc: {require: overridden, set: default}
+    pair: enable_fp32_dest_acc
+    arch: [wh, bh]
+    header: api/compute/compute_kernel_hw_startup.h
+  set_fp32_dest_acc:
+    kind: acquire
+    threads: [unpack, math, pack]
+    exu: {unpack: {require: started}, fpu: {require: started}, pack: {require: started}}
+    resources:
+      dst_math: {require: free}
+      dst_pack: {require: free}
+      dest_acc: {require: default, set: overridden}
+    pair: restore_fp32_dest_acc
+    targs: {enable: 0}
+    arch: [wh, bh]
+    header: api/compute/compute_kernel_hw_startup.h
+  restore_fp32_dest_acc:
+    kind: release
+    threads: [unpack, math, pack]
+    exu: {unpack: {require: started}, fpu: {require: started}, pack: {require: started}}
+    resources:
+      dst_math: {require: free}
+      dst_pack: {require: free}
+      dest_acc: {require: overridden, set: default}
+    pair: set_fp32_dest_acc
+    targs: {enable: 0}
+    arch: [wh, bh]
+    header: api/compute/compute_kernel_hw_startup.h
+
+  # === DST Register Synchronization (8) ===
+  tile_regs_acquire:
+    kind: acquire
+    threads: [unpack, math]
+    resources: {dst_math: {require: free, set: held}}
+    pair: tile_regs_commit
+    header: api/compute/reg_api.h
+  tile_regs_commit:
+    kind: release
+    threads: [unpack, math]
+    resources: {dst_math: {require: held, set: free}}
+    pair: [tile_regs_acquire, tile_regs_acquire_math_clear]
+    header: api/compute/reg_api.h
+  tile_regs_wait:
+    kind: acquire
+    threads: [pack]
+    resources: {dst_pack: {require: free, set: held}}
+    pair: [tile_regs_release, tile_regs_release_math_clear]
+    header: api/compute/reg_api.h
+  tile_regs_release:
+    kind: release
+    threads: [pack]
+    resources: {dst_pack: {require: held, set: free}}
+    pair: tile_regs_wait
+    header: api/compute/reg_api.h
+  acquire_dst:
+    kind: acquire
+    threads: [unpack, math, pack]
+    resources: {dst_math: {require: free, set: held}, dst_pack: {require: free, set: held}}
+    pair: release_dst
+    deprecated: true
+    header: api/compute/reg_api.h
+  release_dst:
+    kind: release
+    threads: [unpack, math, pack]
+    resources: {dst_math: {require: held, set: free}, dst_pack: {require: held, set: free}}
+    pair: acquire_dst
+    deprecated: true
+    header: api/compute/reg_api.h
+  tile_regs_acquire_math_clear:
+    kind: acquire
+    threads: [math]
+    resources: {dst_math: {require: free, set: held}}
+    pair: tile_regs_commit
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/reg_api.h
+  tile_regs_release_math_clear:
+    kind: release
+    threads: [pack]
+    resources: {dst_pack: {require: held, set: free}}
+    pair: tile_regs_wait
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/reg_api.h
+
+  # === Circular Buffer Synchronization (8) ===
+  cb_wait_front:
+    kind: acquire
+    threads: [unpack, dm]
+    resources: {cb_in: {set: ready}}
+    pair: cb_pop_front
+    args: {cb: 0, ntiles: 1}
+    header: api/compute/cb_api.h
+  cb_pop_front:
+    kind: release
+    threads: [unpack, dm]
+    resources: {cb_in: {require: ready, set: idle}}
+    pair: cb_wait_front
+    args: {cb: 0, ntiles: 1}
+    header: api/compute/cb_api.h
+  cb_reserve_back:
+    kind: acquire
+    threads: [pack, dm]
+    resources: {cb_out: {set: reserved}}
+    pair: cb_push_back
+    args: {cb: 0, ntiles: 1}
+    header: api/compute/cb_api.h
+  cb_push_back:
+    kind: release
+    threads: [pack, dm]
+    resources: {cb_out: {require: reserved, set: idle}}
+    pair: cb_reserve_back
+    args: {cb: 0, ntiles: 1}
+    header: api/compute/cb_api.h
+  cb_pages_available_at_front:
+    kind: op
+    threads: [dm]
+    args: {cb: 0, ntiles: 1}
+    header: api/dataflow/dataflow_api.h
+  cb_pages_reservable_at_back:
+    kind: op
+    threads: [dm]
+    args: {cb: 0, ntiles: 1}
+    header: api/dataflow/dataflow_api.h
+  get_tile_address:
+    kind: op
+    threads: [unpack, math, pack]
+    resources: {cb_in: {require: ready}}
+    args: {cb: 0}
+    header: api/compute/cb_api.h
+  read_tile_value:
+    kind: op
+    threads: [unpack, math, pack]
+    resources: {cb_in: {require: ready}}
+    args: {cb: 0}
+    header: api/compute/cb_api.h
+
+  # === Data Format & Geometry Reconfiguration (15) ===
+  reconfig_data_format:
+    kind: reconfig
+    threads: [unpack, math]
+    exu: {unpack: {require: started}, fpu: {require: started}}
+    targs: {src_order: 0}
+    header: api/compute/reconfig_data_format.h
+  reconfig_data_format_srca:
+    kind: reconfig
+    threads: [unpack, math]
+    exu: {unpack: {require: started}, fpu: {require: started}}
+    header: api/compute/reconfig_data_format.h
+  reconfig_data_format_srcb:
+    kind: reconfig
+    threads: [unpack, math]
+    exu: {unpack: {require: started}, fpu: {require: started}}
+    header: api/compute/reconfig_data_format.h
+  reconfig_data_format_skip_int8:
+    kind: reconfig
+    threads: [unpack, math]
+    exu: {unpack: {require: started}, fpu: {require: started}}
+    targs: {src_order: 0}
+    header: api/compute/reconfig_data_format.h
+  reconfig_data_format_srca_skip_int8:
+    kind: reconfig
+    threads: [unpack, math]
+    exu: {unpack: {require: started}, fpu: {require: started}}
+    header: api/compute/reconfig_data_format.h
+  reconfig_data_format_srcb_skip_int8:
+    kind: reconfig
+    threads: [unpack, math]
+    exu: {unpack: {require: started}, fpu: {require: started}}
+    header: api/compute/reconfig_data_format.h
+  reconfig_full_operand:
+    kind: reconfig
+    threads: [unpack, math]
+    exu: {unpack: {require: started}, fpu: {require: started}}
+    targs: {src_order: 0}
+    arch: [wh, bh]
+    header: api/compute/reconfig_data_format.h
+  reconfig_full_operand_srca:
+    kind: reconfig
+    threads: [unpack, math]
+    exu: {unpack: {require: started}, fpu: {require: started}}
+    arch: [wh, bh]
+    header: api/compute/reconfig_data_format.h
+  reconfig_full_operand_srcb:
+    kind: reconfig
+    threads: [unpack, math]
+    exu: {unpack: {require: started}, fpu: {require: started}}
+    arch: [wh, bh]
+    header: api/compute/reconfig_data_format.h
+  reconfig_tile_shape:
+    kind: reconfig
+    threads: [unpack]
+    exu: {unpack: {require: started}}
+    targs: {src_order: 0}
+    arch: [wh, bh]
+    header: api/compute/reconfig_data_format.h
+  reconfig_tile_shape_srca:
+    kind: reconfig
+    threads: [unpack]
+    exu: {unpack: {require: started}}
+    arch: [wh, bh]
+    header: api/compute/reconfig_data_format.h
+  reconfig_tile_shape_srcb:
+    kind: reconfig
+    threads: [unpack]
+    exu: {unpack: {require: started}}
+    arch: [wh, bh]
+    header: api/compute/reconfig_data_format.h
+  pack_reconfig_data_format:
+    kind: reconfig
+    threads: [pack]
+    exu: {pack: {require: [uninit, started]}}
+    targs: {tile_dim_reconfig: 0}
+    header: api/compute/reconfig_data_format.h
+  pack_reconfig_l1_acc:
+    kind: reconfig
+    threads: [pack]
+    exu: {pack: {require: started}}
+    header: api/compute/pack.h
+  pack_relu_config:
+    kind: reconfig
+    threads: [pack]
+    exu: {pack: {require: started}}
+    header: api/compute/pack.h
+
+  # === FPU Eltwise Binary (16) ===
+  binary_tiles_init:
+    kind: init
+    threads: [unpack, math]
+    exu: {unpack: {require: clean, set: binary_generic}, fpu: {require: clean, set: binary_generic}}
+    args: {icb0: 0, icb1: 1}
+    targs: {eltwise_binary_type: 1}
+    header: api/compute/eltwise_binary.h
+  add_init:
+    kind: init
+    threads: [unpack, math]
+    exu: {unpack: {require: clean, set: add}, fpu: {require: clean, set: add}}
+    args: {icb0: 0, icb1: 1}
+    header: api/compute/eltwise_binary.h
+  add_tiles:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: [add, binary_generic]}, fpu: {require: [add, binary_generic]}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1, idst: 4}
+    header: api/compute/eltwise_binary.h
+  add_block:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: [add, binary_generic]}, fpu: {require: [add, binary_generic]}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1, idst: 4, ntiles: 5}
+    header: api/compute/eltwise_binary.h
+  add_reuse_dest_init:
+    kind: init
+    threads: [unpack, math]
+    exu: {unpack: {require: clean, set: add_reuse_dest}, fpu: {require: clean, set: add_reuse_dest}}
+    args: {icb0: 0}
+    targs: {reuse_dest: 0}
+    header: api/compute/eltwise_binary.h
+  add_reuse_dest_tiles:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: add_reuse_dest}, fpu: {require: add_reuse_dest}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, idst: 2}
+    targs: {reuse_dest: 0}
+    header: api/compute/eltwise_binary.h
+  sub_init:
+    kind: init
+    threads: [unpack, math]
+    exu: {unpack: {require: clean, set: sub}, fpu: {require: clean, set: sub}}
+    args: {icb0: 0, icb1: 1}
+    header: api/compute/eltwise_binary.h
+  sub_tiles:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: [sub, binary_generic]}, fpu: {require: [sub, binary_generic]}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1, idst: 4}
+    header: api/compute/eltwise_binary.h
+  sub_block:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: [sub, binary_generic]}, fpu: {require: [sub, binary_generic]}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1, idst: 4, ntiles: 5}
+    header: api/compute/eltwise_binary.h
+  sub_reuse_dest_init:
+    kind: init
+    threads: [unpack, math]
+    exu: {unpack: {require: clean, set: sub_reuse_dest}, fpu: {require: clean, set: sub_reuse_dest}}
+    args: {icb0: 0}
+    targs: {reuse_dest: 0}
+    header: api/compute/eltwise_binary.h
+  sub_reuse_dest_tiles:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: sub_reuse_dest}, fpu: {require: sub_reuse_dest}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, idst: 2}
+    targs: {reuse_dest: 0}
+    header: api/compute/eltwise_binary.h
+  mul_init:
+    kind: init
+    threads: [unpack, math]
+    exu: {unpack: {require: clean, set: mul}, fpu: {require: clean, set: mul}}
+    args: {icb0: 0, icb1: 1}
+    header: api/compute/eltwise_binary.h
+  mul_tiles:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: [mul, binary_generic]}, fpu: {require: [mul, binary_generic]}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1, idst: 4}
+    header: api/compute/eltwise_binary.h
+  mul_block:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: [mul, binary_generic]}, fpu: {require: [mul, binary_generic]}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1, idst: 4, ntiles: 5}
+    header: api/compute/eltwise_binary.h
+  mul_reuse_dest_init:
+    kind: init
+    threads: [unpack, math]
+    exu: {unpack: {require: clean, set: mul_reuse_dest}, fpu: {require: clean, set: mul_reuse_dest}}
+    args: {icb0: 0}
+    targs: {reuse_dest: 0}
+    header: api/compute/eltwise_binary.h
+  mul_reuse_dest_tiles:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: mul_reuse_dest}, fpu: {require: mul_reuse_dest}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, idst: 2}
+    targs: {reuse_dest: 0}
+    header: api/compute/eltwise_binary.h
+
+  # === FPU Broadcast Binary & Unary Broadcast (26) ===
+  bcast_init:
+    kind: init
+    threads: [unpack, math]
+    exu: {unpack: {require: clean, set: bcast_generic}, fpu: {require: clean, set: bcast_generic}}
+    args: {icb0: 0, icb1: 1}
+    targs: {bcast_op: 0, bcast_dim: 1}
+    header: api/compute/bcast.h
+  any_tiles_bcast:
+    kind: op
+    threads: [unpack, math]
+    exu:
+      unpack:
+        require:
+          - bcast_generic
+          - add_bcast_rows
+          - add_bcast_cols
+          - add_bcast_scalar
+          - sub_bcast_rows
+          - sub_bcast_cols
+          - sub_bcast_scalar
+          - mul_bcast_rows
+          - mul_bcast_cols
+          - mul_bcast_scalar
+      fpu:
+        require:
+          - bcast_generic
+          - add_bcast_rows
+          - add_bcast_cols
+          - add_bcast_scalar
+          - sub_bcast_rows
+          - sub_bcast_cols
+          - sub_bcast_scalar
+          - mul_bcast_rows
+          - mul_bcast_cols
+          - mul_bcast_scalar
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1, idst: 4}
+    targs: {bcast_op: 0, bcast_dim: 1}
+    header: api/compute/bcast.h
+  add_bcast_rows_init:
+    kind: init
+    threads: [unpack, math]
+    exu: {unpack: {require: clean, set: add_bcast_rows}, fpu: {require: clean, set: add_bcast_rows}}
+    args: {icb0: 0, icb1: 1}
+    header: api/compute/bcast.h
+  add_tiles_bcast_rows:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: [add_bcast_rows, bcast_generic]}, fpu: {require: [add_bcast_rows, bcast_generic]}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1, idst: 4}
+    header: api/compute/bcast.h
+  add_bcast_cols_init:
+    kind: init
+    threads: [unpack, math]
+    exu: {unpack: {require: clean, set: add_bcast_cols}, fpu: {require: clean, set: add_bcast_cols}}
+    args: {icb0: 0, icb1: 1}
+    header: api/compute/bcast.h
+  add_tiles_bcast_cols:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: [add_bcast_cols, bcast_generic]}, fpu: {require: [add_bcast_cols, bcast_generic]}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1, idst: 4}
+    header: api/compute/bcast.h
+  add_bcast_scalar_init:
+    kind: init
+    threads: [unpack, math]
+    exu: {unpack: {require: clean, set: add_bcast_scalar}, fpu: {require: clean, set: add_bcast_scalar}}
+    args: {icb0: 0, icb1: 1}
+    header: api/compute/bcast.h
+  add_tiles_bcast_scalar:
+    kind: op
+    threads: [unpack, math]
+    exu:
+      unpack: {require: [add_bcast_scalar, bcast_generic]}
+      fpu: {require: [add_bcast_scalar, bcast_generic]}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1, idst: 4}
+    header: api/compute/bcast.h
+  add_tiles_bcast:
+    kind: op
+    threads: [unpack, math]
+    exu:
+      unpack: {require: [add_bcast_rows, add_bcast_cols, add_bcast_scalar, bcast_generic]}
+      fpu: {require: [add_bcast_rows, add_bcast_cols, add_bcast_scalar, bcast_generic]}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1, idst: 4}
+    targs: {bcast_dim: 0}
+    header: api/compute/bcast.h
+  sub_bcast_rows_init:
+    kind: init
+    threads: [unpack, math]
+    exu: {unpack: {require: clean, set: sub_bcast_rows}, fpu: {require: clean, set: sub_bcast_rows}}
+    args: {icb0: 0, icb1: 1}
+    header: api/compute/bcast.h
+  sub_tiles_bcast_rows:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: [sub_bcast_rows, bcast_generic]}, fpu: {require: [sub_bcast_rows, bcast_generic]}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1, idst: 4}
+    header: api/compute/bcast.h
+  sub_bcast_cols_init:
+    kind: init
+    threads: [unpack, math]
+    exu: {unpack: {require: clean, set: sub_bcast_cols}, fpu: {require: clean, set: sub_bcast_cols}}
+    args: {icb0: 0, icb1: 1}
+    header: api/compute/bcast.h
+  sub_tiles_bcast_cols:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: [sub_bcast_cols, bcast_generic]}, fpu: {require: [sub_bcast_cols, bcast_generic]}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1, idst: 4}
+    header: api/compute/bcast.h
+  sub_bcast_scalar_init:
+    kind: init
+    threads: [unpack, math]
+    exu: {unpack: {require: clean, set: sub_bcast_scalar}, fpu: {require: clean, set: sub_bcast_scalar}}
+    args: {icb0: 0, icb1: 1}
+    header: api/compute/bcast.h
+  sub_tiles_bcast_scalar:
+    kind: op
+    threads: [unpack, math]
+    exu:
+      unpack: {require: [sub_bcast_scalar, bcast_generic]}
+      fpu: {require: [sub_bcast_scalar, bcast_generic]}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1, idst: 4}
+    header: api/compute/bcast.h
+  sub_tiles_bcast:
+    kind: op
+    threads: [unpack, math]
+    exu:
+      unpack: {require: [sub_bcast_rows, sub_bcast_cols, sub_bcast_scalar, bcast_generic]}
+      fpu: {require: [sub_bcast_rows, sub_bcast_cols, sub_bcast_scalar, bcast_generic]}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1, idst: 4}
+    targs: {bcast_dim: 0}
+    header: api/compute/bcast.h
+  mul_bcast_rows_init:
+    kind: init
+    threads: [unpack, math]
+    exu: {unpack: {require: clean, set: mul_bcast_rows}, fpu: {require: clean, set: mul_bcast_rows}}
+    args: {icb0: 0, icb1: 1}
+    header: api/compute/bcast.h
+  mul_tiles_bcast_rows:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: [mul_bcast_rows, bcast_generic]}, fpu: {require: [mul_bcast_rows, bcast_generic]}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1, idst: 4}
+    header: api/compute/bcast.h
+  mul_bcast_cols_init:
+    kind: init
+    threads: [unpack, math]
+    exu: {unpack: {require: clean, set: mul_bcast_cols}, fpu: {require: clean, set: mul_bcast_cols}}
+    args: {icb0: 0, icb1: 1}
+    header: api/compute/bcast.h
+  mul_tiles_bcast_cols:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: [mul_bcast_cols, bcast_generic]}, fpu: {require: [mul_bcast_cols, bcast_generic]}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1, idst: 4}
+    header: api/compute/bcast.h
+  mul_bcast_scalar_init:
+    kind: init
+    threads: [unpack, math]
+    exu: {unpack: {require: clean, set: mul_bcast_scalar}, fpu: {require: clean, set: mul_bcast_scalar}}
+    args: {icb0: 0, icb1: 1}
+    header: api/compute/bcast.h
+  mul_tiles_bcast_scalar:
+    kind: op
+    threads: [unpack, math]
+    exu:
+      unpack: {require: [mul_bcast_scalar, bcast_generic]}
+      fpu: {require: [mul_bcast_scalar, bcast_generic]}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1, idst: 4}
+    header: api/compute/bcast.h
+  mul_tiles_bcast:
+    kind: op
+    threads: [unpack, math]
+    exu:
+      unpack: {require: [mul_bcast_rows, mul_bcast_cols, mul_bcast_scalar, bcast_generic]}
+      fpu: {require: [mul_bcast_rows, mul_bcast_cols, mul_bcast_scalar, bcast_generic]}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1, idst: 4}
+    targs: {bcast_dim: 0}
+    header: api/compute/bcast.h
+  unary_bcast_init:
+    kind: init
+    threads: [unpack, math]
+    exu:
+      unpack: {require: [clean, unary_bcast], set: unary_bcast, dirty: true}
+      fpu: {require: [clean, unary_bcast], set: unary_bcast, dirty: true}
+    uninit: unary_bcast_uninit
+    args: {icb0: 0}
+    targs: {bcast_type: 0}
+    header: api/compute/bcast.h
+  unary_bcast:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: unary_bcast}, fpu: {require: unary_bcast}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, idst: 2}
+    targs: {bcast_type: 0}
+    header: api/compute/bcast.h
+  unary_bcast_uninit:
+    kind: uninit
+    threads: [unpack, math]
+    exu: {unpack: {require: unary_bcast, set: idle}, fpu: {require: unary_bcast, set: idle}}
+    args: {icb0: 0}
+    targs: {bcast_type: 0}
+    header: api/compute/bcast.h
+
+  # === FPU Matmul (6) ===
+  matmul_init:
+    kind: init
+    threads: [unpack, math]
+    exu: {unpack: {require: clean, set: matmul}, fpu: {require: clean, set: matmul}}
+    args: {icb0: 0, icb1: 1, transpose: 2}
+    header: api/compute/matmul.h
+  matmul_tiles:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: [matmul, matmul_block]}, fpu: {require: [matmul, matmul_block]}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1, idst: 4}
+    header: api/compute/matmul.h
+  matmul_block_init:
+    kind: init
+    threads: [unpack, math]
+    exu: {unpack: {require: clean, set: matmul_block}, fpu: {require: clean, set: matmul_block}}
+    args: {icb0: 0, icb1: 1, transpose: 2, ct_dim: 3, rt_dim: 4, kt_dim: 5}
+    header: api/compute/matmul.h
+  matmul_block:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: matmul_block}, fpu: {require: matmul_block}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1, idst: 4, transpose: 5, ct_dim: 6, rt_dim: 7, kt_dim: 8}
+    header: api/compute/matmul.h
+  matmul_block_math_dynamic_throttle:
+    kind: op
+    threads: [math]
+    exu: {fpu: {require: matmul_block}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1, idst: 2, transpose: 3, ct_dim: 4, rt_dim: 5}
+    arch: [bh]
+    header: api/compute/matmul.h
+  mm_uninit:
+    kind: uninit
+    threads: [unpack, math]
+    exu:
+      unpack: {require: [matmul, matmul_block], set: idle}
+      fpu: {require: [matmul, matmul_block], set: idle}
+    args: {icb0: 0, icb1: 1}
+    arch: [quasar]
+    header: api/compute/matmul.h
+
+  # === Datacopy, Transpose & Pack (16) ===
+  copy_init:
+    kind: init
+    threads: [unpack, math]
+    exu: {unpack: {require: clean, set: copy}, fpu: {require: clean, set: copy}}
+    args: {icb0: 0}
+    header: api/compute/tile_move_copy.h
+  copy_tile_init:
+    kind: init
+    threads: [unpack, math]
+    exu: {unpack: {require: clean, set: copy}, fpu: {require: clean, set: copy}}
+    args: {icb0: 0}
+    deprecated: true
+    header: api/compute/tile_move_copy.h
+  copy_tile_to_dst_init_short:
+    kind: init
+    threads: [unpack, math]
+    exu: {unpack: {require: clean, set: copy}, fpu: {require: clean, set: copy}}
+    args: {icb0: 0}
+    deprecated: true
+    header: api/compute/tile_move_copy.h
+  copy_tile_to_dst_init_short_with_dt:
+    kind: init
+    threads: [unpack, math]
+    exu: {unpack: {require: clean, set: copy}, fpu: {require: clean, set: copy}}
+    args: {icb0: 1}
+    arch: [wh, bh]
+    deprecated: true
+    header: api/compute/tile_move_copy.h
+  copy_tile:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: copy}, fpu: {require: copy}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, idst: 2}
+    header: api/compute/tile_move_copy.h
+  copy_block:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: copy}, fpu: {require: copy}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, idst: 2, ntiles: 3}
+    header: api/compute/tile_move_copy.h
+  dummy_unpack:
+    kind: op
+    threads: [unpack]
+    resources: {cb_in: {require: ready}}
+    args: {cb: 0}
+    header: api/compute/tile_move_copy.h
+  transpose_init:
+    kind: init
+    threads: [unpack, math]
+    exu: {unpack: {require: clean, set: transpose}, fpu: {require: clean, set: transpose}}
+    args: {icb0: 0}
+    header: api/compute/transpose.h
+  transpose_tile:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: transpose}, fpu: {require: transpose}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, idst: 2}
+    header: api/compute/transpose.h
+  transpose_block:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: transpose}, fpu: {require: transpose}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, idst: 2, ntiles: 3}
+    header: api/compute/transpose.h
+  transpose_dest_init:
+    kind: init
+    threads: [math]
+    exu: {fpu: {require: clean, set: transpose_dest}}
+    targs: {is_32bit: 0, transpose_of_faces: 1}
+    header: api/compute/transpose_dest.h
+  transpose_dest:
+    kind: op
+    threads: [unpack, math]
+    exu: {fpu: {require: transpose_dest}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    targs: {is_32bit: 0, transpose_of_faces: 1}
+    header: api/compute/transpose_dest.h
+  pack_init:
+    kind: init
+    threads: [pack]
+    exu: {pack: {require: [uninit, clean], set: idle}}
+    args: {ocb: 0}
+    header: api/compute/pack.h
+  pack_tile:
+    kind: op
+    threads: [pack]
+    exu:
+      pack:
+        require:
+          - idle
+          - reduce_mask
+          - reduce_block_max_row_mask
+          - mul_reduce_scalar_mask
+          - custom_mm_pack
+          - sdpa_custom_mm_pack
+    resources: {dst_pack: {require: held}}
+    args: {idst: 0, ocb: 1}
+    header: api/compute/pack.h
+  pack_block:
+    kind: op
+    threads: [pack]
+    exu:
+      pack:
+        require:
+          - idle
+          - reduce_mask
+          - reduce_block_max_row_mask
+          - mul_reduce_scalar_mask
+          - custom_mm_pack
+          - sdpa_custom_mm_pack
+    resources: {dst_pack: {require: held}}
+    args: {idst: 0, ocb: 1, ntiles: 2}
+    header: api/compute/pack.h
+  dummy_pack:
+    kind: op
+    threads: [pack]
+    resources: {cb_out: {require: reserved}}
+    args: {cb: 0}
+    header: api/compute/pack.h
+
+  # === Reduce (15) ===
+  reduce_init:
+    kind: init
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: [clean, reduce], set: reduce, dirty: true}
+      fpu: {require: [clean, reduce], set: reduce, dirty: true}
+      pack: {require: [clean, reduce_mask], set: reduce_mask, dirty: true}
+    uninit: reduce_uninit
+    args: {icb0: 0, icb1: 1, ocb: 2}
+    targs: {reduce_type: 0, reduce_dim: 1}
+    header: api/compute/reduce.h
+  reduce_tile:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: reduce}, fpu: {require: reduce}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1, idst: 4}
+    targs: {reduce_type: 0, reduce_dim: 1}
+    header: api/compute/reduce.h
+  reduce_block:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: reduce}, fpu: {require: reduce}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1, idst: 4, ntiles: 5}
+    targs: {reduce_type: 0, reduce_dim: 1}
+    header: api/compute/reduce.h
+  reduce_tile_math:
+    kind: op
+    threads: [math]
+    exu: {fpu: {require: [reduce, tilize_ab_reduce]}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    targs: {reduce_type: 0, reduce_dim: 1}
+    header: api/compute/reduce.h
+  reduce_uninit:
+    kind: uninit
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: reduce, set: idle}
+      fpu: {require: reduce, set: idle}
+      pack: {require: reduce_mask, set: idle}
+    args: {icb0: 0}
+    header: api/compute/reduce.h
+  reduce_block_max_row_init:
+    kind: init
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: [clean, reduce_block_max_row], set: reduce_block_max_row, dirty: true}
+      fpu: {require: [clean, reduce_block_max_row], set: reduce_block_max_row, dirty: true}
+      pack: {require: [clean, reduce_block_max_row_mask], set: reduce_block_max_row_mask, dirty: true}
+    uninit: reduce_block_max_row_uninit
+    targs: {block_ct_dim: 0, respect_trigger: 1}
+    header: api/compute/reduce_custom.h
+  reduce_block_max_row_reinit_short:
+    kind: init
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: [clean, reduce_block_max_row], set: reduce_block_max_row, dirty: true}
+      fpu: {require: [clean, reduce_block_max_row], set: reduce_block_max_row, dirty: true}
+      pack: {require: [clean, reduce_block_max_row_mask], set: reduce_block_max_row_mask, dirty: true}
+    uninit: reduce_block_max_row_uninit
+    targs: {block_ct_dim: 0, respect_trigger: 1}
+    arch: [bh]
+    header: api/compute/reduce_custom.h
+  reduce_block_max_row_reinit_minimal:
+    kind: init
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: [clean, reduce_block_max_row], set: reduce_block_max_row, dirty: true}
+      fpu: {require: [clean, reduce_block_max_row], set: reduce_block_max_row, dirty: true}
+      pack: {require: [clean, reduce_block_max_row_mask], set: reduce_block_max_row_mask, dirty: true}
+    uninit: reduce_block_max_row_uninit
+    targs: {block_ct_dim: 0, respect_trigger: 1}
+    arch: [bh]
+    header: api/compute/reduce_custom.h
+  reduce_block_max_row:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: reduce_block_max_row}, fpu: {require: reduce_block_max_row}}
+    resources: {dst_math: {require: held}}
+    targs: {block_ct_dim: 0, respect_trigger: 1}
+    header: api/compute/reduce_custom.h
+  reduce_block_max_row_uninit:
+    kind: uninit
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: reduce_block_max_row, set: idle}
+      fpu: {require: reduce_block_max_row, set: idle}
+      pack: {require: reduce_block_max_row_mask, set: idle}
+    args: {icb0: 0}
+    targs: {respect_trigger: 0}
+    header: api/compute/reduce_custom.h
+  reduce_block_max_row_init_runtime:
+    kind: init
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: [clean, reduce_block_max_row_rt], set: reduce_block_max_row_rt, dirty: true}
+      fpu: {require: [clean, reduce_block_max_row_rt], set: reduce_block_max_row_rt, dirty: true}
+      pack: {require: [clean, reduce_block_max_row_mask], set: reduce_block_max_row_mask, dirty: true}
+    uninit: reduce_block_max_row_uninit_runtime
+    header: api/compute/reduce_custom.h
+  reduce_block_max_row_reinit_short_runtime:
+    kind: init
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: [clean, reduce_block_max_row_rt], set: reduce_block_max_row_rt, dirty: true}
+      fpu: {require: [clean, reduce_block_max_row_rt], set: reduce_block_max_row_rt, dirty: true}
+      pack: {require: [clean, reduce_block_max_row_mask], set: reduce_block_max_row_mask, dirty: true}
+    uninit: reduce_block_max_row_uninit_runtime
+    arch: [bh]
+    header: api/compute/reduce_custom.h
+  reduce_block_max_row_reinit_minimal_runtime:
+    kind: init
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: [clean, reduce_block_max_row_rt], set: reduce_block_max_row_rt, dirty: true}
+      fpu: {require: [clean, reduce_block_max_row_rt], set: reduce_block_max_row_rt, dirty: true}
+      pack: {require: [clean, reduce_block_max_row_mask], set: reduce_block_max_row_mask, dirty: true}
+    uninit: reduce_block_max_row_uninit_runtime
+    arch: [bh]
+    header: api/compute/reduce_custom.h
+  reduce_block_max_row_runtime:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: reduce_block_max_row_rt}, fpu: {require: reduce_block_max_row_rt}}
+    resources: {dst_math: {require: held}}
+    header: api/compute/reduce_custom.h
+  reduce_block_max_row_uninit_runtime:
+    kind: uninit
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: reduce_block_max_row_rt, set: idle}
+      fpu: {require: reduce_block_max_row_rt, set: idle}
+      pack: {require: reduce_block_max_row_mask, set: idle}
+    args: {icb0: 0}
+    header: api/compute/reduce_custom.h
+
+  # === Tilize & Untilize (22) ===
+  tilize_init:
+    kind: init
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: [clean, tilize], set: tilize, dirty: true}
+      fpu: {require: clean, set: tilize}
+      pack: {require: [clean, tilize_pack], set: tilize_pack, dirty: true}
+    uninit: tilize_uninit
+    args: {icb0: 0, block: 1, ocb: 2}
+    header: api/compute/tilize.h
+  tilize_init_short_with_dt:
+    kind: init
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: [clean, tilize], set: tilize, dirty: true}
+      fpu: {require: clean, set: tilize}
+      pack: {require: [clean, tilize_pack], set: tilize_pack, dirty: true}
+    uninit: tilize_uninit
+    args: {icb0: 1, block: 2, ocb: 3}
+    arch: [wh, bh]
+    header: api/compute/tilize.h
+  tilize_block:
+    kind: op
+    threads: [unpack, math, pack]
+    exu: {unpack: {require: tilize}, fpu: {require: tilize}, pack: {require: tilize_pack}}
+    resources: {dst_math: {require: free}, dst_pack: {require: free}}
+    args: {icb0: 0, block: 1, ocb: 2}
+    header: api/compute/tilize.h
+  tilize_uninit:
+    kind: uninit
+    threads: [unpack, pack]
+    exu: {unpack: {require: tilize, set: idle}, pack: {require: tilize_pack, set: idle}}
+    args: {icb0: 0, ocb: 1}
+    header: api/compute/tilize.h
+  fast_tilize_init:
+    kind: init
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: [clean, fast_tilize], set: fast_tilize, dirty: true}
+      fpu: {require: [clean, fast_tilize], set: fast_tilize, dirty: true}
+      pack: {require: [clean, fast_tilize], set: fast_tilize, dirty: true}
+    uninit: fast_tilize_uninit
+    args: {icb0: 0, block: 1, ocb: 2}
+    header: api/compute/tilize.h
+  fast_tilize_init_skip_remap:
+    kind: init
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: [clean, fast_tilize], set: fast_tilize, dirty: true}
+      fpu: {require: [clean, fast_tilize], set: fast_tilize, dirty: true}
+      pack: {require: [clean, fast_tilize], set: fast_tilize, dirty: true}
+    uninit: fast_tilize_uninit
+    args: {icb0: 0, block: 1, ocb: 2}
+    header: api/compute/tilize.h
+  fast_tilize_init_with_dt:
+    kind: init
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: [clean, fast_tilize], set: fast_tilize, dirty: true}
+      fpu: {require: [clean, fast_tilize], set: fast_tilize, dirty: true}
+      pack: {require: [clean, fast_tilize], set: fast_tilize, dirty: true}
+    uninit: fast_tilize_uninit
+    args: {icb0: 0, block: 1, ocb: 2}
+    header: api/compute/tilize.h
+  fast_tilize_init_with_dt_skip_remap:
+    kind: init
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: [clean, fast_tilize], set: fast_tilize, dirty: true}
+      fpu: {require: [clean, fast_tilize], set: fast_tilize, dirty: true}
+      pack: {require: [clean, fast_tilize], set: fast_tilize, dirty: true}
+    uninit: fast_tilize_uninit
+    args: {icb0: 0, block: 1, ocb: 2}
+    header: api/compute/tilize.h
+  fast_tilize_block:
+    kind: op
+    threads: [unpack, math, pack]
+    exu: {unpack: {require: fast_tilize}, fpu: {require: fast_tilize}, pack: {require: fast_tilize}}
+    resources: {dst_math: {require: free}, dst_pack: {require: free}}
+    args: {icb0: 0, block: 1, ocb: 2}
+    header: api/compute/tilize.h
+  fast_tilize_uninit:
+    kind: uninit
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: fast_tilize, set: idle}
+      fpu: {require: fast_tilize, set: idle}
+      pack: {require: fast_tilize, set: idle}
+    args: {icb0: 0, ocb: 1, block: 2}
+    header: api/compute/tilize.h
+  tilizeA_B_reduce_init:
+    kind: init
+    threads: [unpack, math]
+    exu:
+      unpack: {require: [clean, tilize_ab], set: tilize_ab, dirty: true}
+      fpu: {require: clean, set: tilize_ab_reduce}
+    uninit: unpack_tilizeA_B_uninit
+    args: {icb0: 0, icb1: 1, block: 2}
+    header: api/compute/tilize.h
+  unpack_tilizeA_B_block:
+    kind: op
+    threads: [unpack]
+    exu: {unpack: {require: tilize_ab}}
+    args: {icb0: 0, icb1: 1, block: 2}
+    header: api/compute/tilize.h
+  unpack_tilizeA_B_uninit:
+    kind: uninit
+    threads: [unpack]
+    exu: {unpack: {require: tilize_ab, set: idle}}
+    args: {icb0: 0}
+    header: api/compute/tilize.h
+  untilize_init:
+    kind: init
+    threads: [unpack, math]
+    exu:
+      unpack: {require: [clean, untilize], set: untilize, dirty: true}
+      fpu: {require: clean, set: untilize}
+    uninit: untilize_uninit
+    args: {icb0: 0}
+    deprecated: true
+    header: api/compute/untilize.h
+  untilize_block:
+    kind: op
+    threads: [unpack, math, pack]
+    exu: {unpack: {require: untilize}, fpu: {require: untilize}, pack: {require: idle}}
+    resources: {dst_math: {require: free}, dst_pack: {require: free}}
+    args: {icb0: 0, ocb: 2}
+    deprecated: true
+    header: api/compute/untilize.h
+  untilize_uninit:
+    kind: uninit
+    threads: [unpack]
+    exu: {unpack: {require: untilize, set: idle}}
+    args: {icb0: 0}
+    deprecated: true
+    header: api/compute/untilize.h
+  pack_untilize_init:
+    kind: init
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: clean, set: pack_untilize_copy}
+      fpu: {require: clean, set: pack_untilize_copy}
+      pack: {require: [clean, pack_untilize], set: pack_untilize, dirty: true}
+    uninit: pack_untilize_uninit
+    args: {icb0: 0, ocb: 1}
+    targs: {block_ct_dim: 0, full_ct_dim: 1}
+    header: api/compute/pack_untilize.h
+  pack_untilize_init_skip_remap:
+    kind: init
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: clean, set: pack_untilize_copy}
+      fpu: {require: clean, set: pack_untilize_copy}
+      pack: {require: [clean, pack_untilize], set: pack_untilize, dirty: true}
+    uninit: pack_untilize_uninit
+    args: {icb0: 0, ocb: 1}
+    targs: {block_ct_dim: 0, full_ct_dim: 1}
+    header: api/compute/pack_untilize.h
+  pack_untilize_block:
+    kind: op
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: pack_untilize_copy}
+      fpu: {require: pack_untilize_copy}
+      pack: {require: pack_untilize}
+    resources: {dst_math: {require: free}, dst_pack: {require: free}}
+    args: {icb0: 0, ocb: 2}
+    targs: {block_ct_dim: 0, full_ct_dim: 1}
+    header: api/compute/pack_untilize.h
+  pack_untilize_dest_init:
+    kind: init
+    threads: [math, pack]
+    exu: {pack: {require: [clean, pack_untilize], set: pack_untilize, dirty: true}}
+    uninit: pack_untilize_uninit
+    args: {ocb: 0}
+    targs: {block_ct_dim: 0, full_ct_dim: 1, narrow_row: 2, row_num_datums: 3, dense: 4}
+    header: api/compute/pack_untilize.h
+  pack_untilize_dest:
+    kind: op
+    threads: [pack]
+    exu: {pack: {require: pack_untilize}}
+    resources: {dst_pack: {require: held}}
+    args: {ocb: 0}
+    targs: {block_ct_dim: 0, full_ct_dim: 1, narrow_row: 3, row_num_datums: 4, dense: 6}
+    header: api/compute/pack_untilize.h
+  pack_untilize_uninit:
+    kind: uninit
+    threads: [pack]
+    exu: {pack: {require: pack_untilize, set: idle}}
+    args: {ocb: 0}
+    header: api/compute/pack_untilize.h
+
+  # === SFPU Eltwise Unary (MATH) (292) ===
+  abs_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: abs_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/compute_kernel_api.h
+  abs_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: abs_tile}}
+    header: api/compute/compute_kernel_api.h
+  abs_tile_int32:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: abs_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/compute_kernel_api.h
+  acos_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: acos_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/trigonometry.h
+  acos_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: acos_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/trigonometry.h
+  acosh_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: acosh_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/trigonometry.h
+  acosh_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: acosh_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/trigonometry.h
+  add_unary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: binop_with_scalar}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/binop_with_scalar.h
+  add_unary_tile_int32:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: binop_with_scalar}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/binop_with_scalar.h
+  addcdiv_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: addcdiv_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, idst2: 2, odst: 3}
+    header: api/compute/eltwise_unary/addcdiv.h
+  addcdiv_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: addcdiv_tile}}
+    header: api/compute/eltwise_unary/addcdiv.h
+  addcmul_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: addcmul_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, idst2: 2, odst: 3}
+    header: api/compute/eltwise_unary/addcmul.h
+  addcmul_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: addcmul_tile}}
+    header: api/compute/eltwise_unary/addcmul.h
+  alt_complex_rotate90_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: alt_complex_rotate90_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/compute_kernel_api.h
+  alt_complex_rotate90_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: alt_complex_rotate90_tile}}
+    header: api/compute/compute_kernel_api.h
+  asin_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: asin_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/trigonometry.h
+  asin_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: asin_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/trigonometry.h
+  asinh_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: asinh_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/trigonometry.h
+  asinh_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: asinh_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/trigonometry.h
+  atan_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: atan_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/trigonometry.h
+  atan_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: atan_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/trigonometry.h
+  atanh_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: atanh_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/trigonometry.h
+  atanh_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: atanh_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/trigonometry.h
+  binop_with_scalar_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: binop_with_scalar}}
+    stateful: true
+    header: api/compute/eltwise_unary/binop_with_scalar.h
+  bitwise_and_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: bitwise_and_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/bitwise.h
+  bitwise_and_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: bitwise_and_tile}}
+    header: api/compute/eltwise_unary/bitwise.h
+  bitwise_not_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: bitwise_not_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/bitwise_not.h
+  bitwise_not_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: bitwise_not_tile}}
+    header: api/compute/eltwise_unary/bitwise_not.h
+  bitwise_or_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: bitwise_or_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/bitwise.h
+  bitwise_or_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: bitwise_or_tile}}
+    header: api/compute/eltwise_unary/bitwise.h
+  bitwise_xor_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: bitwise_xor_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/bitwise.h
+  bitwise_xor_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: bitwise_xor_tile}}
+    header: api/compute/eltwise_unary/bitwise.h
+  cbrt_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: cbrt_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/cbrt.h
+  cbrt_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: cbrt_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/cbrt.h
+  ceil_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: rounding_op}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/rounding.h
+  celu_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: celu_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/activations.h
+  celu_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: celu_tile}}
+    header: api/compute/eltwise_unary/activations.h
+  clamp_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: clamp_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/clamp.h
+  clamp_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: clamp_tile}}
+    header: api/compute/eltwise_unary/clamp.h
+  clamp_tile_int32:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: clamp_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/clamp.h
+  cos_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: cos_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/trigonometry.h
+  cos_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: cos_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/trigonometry.h
+  cosh_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: cosh_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/trigonometry.h
+  cosh_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: cosh_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/trigonometry.h
+  digamma_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: digamma_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/digamma.h
+  digamma_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: digamma_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/digamma.h
+  div_unary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: binop_with_scalar}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/binop_with_scalar.h
+  dropout_kernel_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: dropout_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/dropout.h
+  dropout_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: dropout_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/dropout.h
+  elu_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: elu_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/elu.h
+  elu_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: elu_tile}}
+    header: api/compute/eltwise_unary/elu.h
+  eqz_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: eqz_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/comp.h
+  eqz_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: eqz_tile}}
+    header: api/compute/eltwise_unary/comp.h
+  eqz_tile_int32:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: eqz_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/comp.h
+  eqz_tile_uint16:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: eqz_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/comp.h
+  eqz_tile_uint32:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: eqz_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/comp.h
+  erf_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: erf_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/erf_erfc.h
+  erf_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: erf_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/erf_erfc.h
+  erfc_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: erfc_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/erf_erfc.h
+  erfc_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: erfc_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/erf_erfc.h
+  erfinv_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: erfinv_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/erfinv.h
+  erfinv_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: erfinv_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/erfinv.h
+  exp2_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: exp2_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/compute_kernel_api.h
+  exp2_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: exp2_tile}}
+    stateful: true
+    header: api/compute/compute_kernel_api.h
+  exp_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: exp_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    targs: {approx: 0, input_clamping: 2}
+    header: api/compute/eltwise_unary/exp.h
+  exp_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: exp_tile}}
+    targs: {approx: 0, input_clamping: 2}
+    stateful: true
+    header: api/compute/eltwise_unary/exp.h
+  expm1_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: expm1_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/compute_kernel_api.h
+  expm1_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: expm1_tile}}
+    stateful: true
+    header: api/compute/compute_kernel_api.h
+  fill_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: fill_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/fill.h
+  fill_tile_bitcast:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: fill_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/fill.h
+  fill_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: fill_tile}}
+    header: api/compute/eltwise_unary/fill.h
+  fill_tile_int:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: fill_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/fill.h
+  floor_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: rounding_op}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/rounding.h
+  fmod_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: fmod_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/fmod.h
+  fmod_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: fmod_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/fmod.h
+  frac_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: rounding_op}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/rounding.h
+  gelu_derivative_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: gelu_derivative_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/gelu.h
+  gelu_derivative_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: gelu_derivative_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/gelu.h
+  gelu_tanh_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: gelu_tanh_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/gelu.h
+  gelu_tanh_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: gelu_tanh_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/gelu.h
+  gelu_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: gelu_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/gelu.h
+  gelu_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: gelu_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/gelu.h
+  gez_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: gez_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/comp.h
+  gez_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: gez_tile}}
+    header: api/compute/eltwise_unary/comp.h
+  gez_tile_int32:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: gez_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/comp.h
+  gtz_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: gtz_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/comp.h
+  gtz_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: gtz_tile}}
+    header: api/compute/eltwise_unary/comp.h
+  gtz_tile_int32:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: gtz_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/comp.h
+  hardmish_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: hardmish_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/hardmish.h
+  hardmish_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: hardmish_tile}}
+    header: api/compute/eltwise_unary/hardmish.h
+  hardshrink_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: hardshrink_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/activations.h
+  hardshrink_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: hardshrink_tile}}
+    header: api/compute/eltwise_unary/activations.h
+  hardsigmoid_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: hardsigmoid_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/activations.h
+  hardsigmoid_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: hardsigmoid_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/activations.h
+  hardtanh_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: hardtanh_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/hardtanh.h
+  hardtanh_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: hardtanh_tile}}
+    header: api/compute/eltwise_unary/hardtanh.h
+  heaviside_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: heaviside_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/compute_kernel_api.h
+  heaviside_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: heaviside_tile}}
+    header: api/compute/compute_kernel_api.h
+  i0_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: i0_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/i0.h
+  i0_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: i0_tile}}
+    header: api/compute/eltwise_unary/i0.h
+  i1_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: i1_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/i1.h
+  i1_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: i1_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/i1.h
+  identity_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: identity_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/identity.h
+  identity_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: identity_tile}}
+    header: api/compute/eltwise_unary/identity.h
+  identity_tile_uint32:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: identity_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/identity.h
+  isfinite_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: isfinite_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/isinf_isnan.h
+  isfinite_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: isfinite_tile}}
+    header: api/compute/eltwise_unary/isinf_isnan.h
+  isinf_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: isinf_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/isinf_isnan.h
+  isinf_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: isinf_tile}}
+    header: api/compute/eltwise_unary/isinf_isnan.h
+  isnan_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: isnan_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/isinf_isnan.h
+  isnan_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: isnan_tile}}
+    header: api/compute/eltwise_unary/isinf_isnan.h
+  isneginf_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: isneginf_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/isinf_isnan.h
+  isneginf_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: isneginf_tile}}
+    header: api/compute/eltwise_unary/isinf_isnan.h
+  isposinf_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: isposinf_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/isinf_isnan.h
+  isposinf_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: isposinf_tile}}
+    header: api/compute/eltwise_unary/isinf_isnan.h
+  leaky_relu_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: leaky_relu_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/relu.h
+  leaky_relu_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: leaky_relu_tile}}
+    header: api/compute/eltwise_unary/relu.h
+  left_shift_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: left_shift_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/shift.h
+  left_shift_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: left_shift_tile}}
+    header: api/compute/eltwise_unary/shift.h
+  lerp_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: lerp_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, idst2: 2, odst: 3}
+    header: api/compute/eltwise_unary/lerp.h
+  lerp_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: lerp_tile}}
+    header: api/compute/eltwise_unary/lerp.h
+  lez_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: lez_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/comp.h
+  lez_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: lez_tile}}
+    header: api/compute/eltwise_unary/comp.h
+  lez_tile_int32:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: lez_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/comp.h
+  lgamma_adjusted_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: lgamma_adjusted_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, idst2: 2}
+    header: api/compute/eltwise_unary/lgamma.h
+  lgamma_adjusted_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: lgamma_adjusted_tile}}
+    header: api/compute/eltwise_unary/lgamma.h
+  lgamma_stirling_float_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: lgamma_stirling_float_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, idst2: 2}
+    header: api/compute/eltwise_unary/lgamma.h
+  lgamma_stirling_float_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: lgamma_stirling_float_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/lgamma.h
+  lgamma_stirling_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: lgamma_stirling_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/lgamma.h
+  lgamma_stirling_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: lgamma_stirling_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/lgamma.h
+  log1p_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: log1p_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/log1p.h
+  log1p_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: log1p_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/log1p.h
+  log_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: log_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/compute_kernel_api.h
+  log_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: log_tile}}
+    stateful: true
+    header: api/compute/compute_kernel_api.h
+  log_with_base_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: log_with_base_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/compute_kernel_api.h
+  log_with_base_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: log_with_base_tile}}
+    stateful: true
+    header: api/compute/compute_kernel_api.h
+  logical_not_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: logical_not_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/logical_not.h
+  logical_not_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: logical_not_tile}}
+    header: api/compute/eltwise_unary/logical_not.h
+  logsigmoid_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: logsigmoid_tile}}
+    resources: {dst_math: {require: held}}
+    args: {odst: 2}
+    header: api/compute/logsigmoid.h
+  logsigmoid_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: logsigmoid_tile}}
+    header: api/compute/logsigmoid.h
+  ltz_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: ltz_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/comp.h
+  ltz_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: ltz_tile}}
+    header: api/compute/eltwise_unary/comp.h
+  ltz_tile_int32:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: ltz_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/comp.h
+  mac_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: mac_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, idst2: 2, odst: 3}
+    header: api/compute/eltwise_unary/mac.h
+  mac_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: mac_tile}}
+    header: api/compute/eltwise_unary/mac.h
+  max_reduce_with_indices:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: max_reduce_with_indices}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/compute_kernel_api.h
+  max_reduce_with_indices_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: max_reduce_with_indices}}
+    stateful: true
+    header: api/compute/compute_kernel_api.h
+  mish_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: mish_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/mish.h
+  mish_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: mish_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/mish.h
+  mul_unary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: binop_with_scalar}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/binop_with_scalar.h
+  negative_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: negative_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/negative.h
+  negative_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: negative_tile}}
+    header: api/compute/eltwise_unary/negative.h
+  negative_tile_int32:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: negative_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/negative.h
+  nez_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: nez_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/comp.h
+  nez_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: nez_tile}}
+    header: api/compute/eltwise_unary/comp.h
+  nez_tile_int32:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: nez_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/comp.h
+  nez_tile_uint16:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: nez_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/comp.h
+  nez_tile_uint32:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: nez_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/comp.h
+  polygamma_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: polygamma_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/polygamma.h
+  polygamma_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: polygamma_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/polygamma.h
+  power_iterative_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: power_iterative_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/compute_kernel_api.h
+  power_iterative_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: power_iterative_tile}}
+    header: api/compute/compute_kernel_api.h
+  power_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: power_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/compute_kernel_api.h
+  power_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: power_tile}}
+    stateful: true
+    header: api/compute/compute_kernel_api.h
+  prelu_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: prelu_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/prelu.h
+  prelu_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: prelu_tile}}
+    header: api/compute/eltwise_unary/prelu.h
+  rand_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: rand_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/rand.h
+  rand_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: rand_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/rand.h
+  rdiv_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: rdiv_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/rdiv.h
+  rdiv_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: rdiv_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/rdiv.h
+  recip_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: recip_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/recip.h
+  recip_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: recip_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/recip.h
+  relu_max_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: relu_max_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/relu.h
+  relu_max_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: relu_max_tile}}
+    header: api/compute/eltwise_unary/relu.h
+  relu_max_tile_int32:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: relu_max_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/relu.h
+  relu_max_tile_uint16:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: relu_max_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/relu.h
+  relu_max_tile_uint32:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: relu_max_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/relu.h
+  relu_min_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: relu_min_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/relu.h
+  relu_min_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: relu_min_tile}}
+    header: api/compute/eltwise_unary/relu.h
+  relu_min_tile_int32:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: relu_min_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/relu.h
+  relu_min_tile_uint16:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: relu_min_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/relu.h
+  relu_min_tile_uint32:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: relu_min_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/relu.h
+  relu_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: relu_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/relu.h
+  relu_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: relu_tile}}
+    header: api/compute/eltwise_unary/relu.h
+  relu_tile_int32:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: relu_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/relu.h
+  remainder_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: remainder_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/remainder.h
+  remainder_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: remainder_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/remainder.h
+  remainder_tile_uint32:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: remainder_tile_uint32}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/remainder.h
+  remainder_tile_uint32_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: remainder_tile_uint32}}
+    stateful: true
+    header: api/compute/eltwise_unary/remainder.h
+  right_shift_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: right_shift_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/shift.h
+  right_shift_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: right_shift_tile}}
+    header: api/compute/eltwise_unary/shift.h
+  round_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: rounding_op}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/rounding.h
+  rounding_op_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: rounding_op}}
+    header: api/compute/eltwise_unary/rounding.h
+  rpow_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: rpow_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/rpow.h
+  rpow_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: rpow_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/rpow.h
+  rsqrt_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: rsqrt_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/rsqrt.h
+  rsqrt_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: rsqrt_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/rsqrt.h
+  rsub_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: rsub_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/reverseops.h
+  rsub_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: rsub_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/reverseops.h
+  rsub_unary_int32_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: rsub_unary_int32_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/rsub.h
+  rsub_unary_int32_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: rsub_unary_int32_tile}}
+    header: api/compute/eltwise_unary/rsub.h
+  rsub_unary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: binop_with_scalar}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/binop_with_scalar.h
+  selu_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: selu_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/selu.h
+  selu_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: selu_tile}}
+    header: api/compute/eltwise_unary/selu.h
+  sfpu_add_int:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: sfpu_sum_int}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/sfpu_int_sum.h
+  sfpu_add_top_row:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: sfpu_add_top_row}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/compute_kernel_api.h
+  sfpu_add_top_row_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: sfpu_add_top_row}}
+    stateful: true
+    header: api/compute/compute_kernel_api.h
+  sfpu_reduce:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: sfpu_reduce}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/compute_kernel_api.h
+  sfpu_reduce_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: sfpu_reduce}}
+    stateful: true
+    header: api/compute/compute_kernel_api.h
+  sfpu_sum_int_col:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: sfpu_sum_int}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/sfpu_int_sum.h
+  sfpu_sum_int_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: sfpu_sum_int}}
+    stateful: true
+    header: api/compute/eltwise_unary/sfpu_int_sum.h
+  sfpu_sum_int_row:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: sfpu_sum_int}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/sfpu_int_sum.h
+  sigmoid_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: sigmoid_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/compute_kernel_api.h
+  sigmoid_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: sigmoid_tile}}
+    stateful: true
+    header: api/compute/compute_kernel_api.h
+  sign_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: sign_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/compute_kernel_api.h
+  sign_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: sign_tile}}
+    header: api/compute/compute_kernel_api.h
+  signbit_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: signbit_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/compute_kernel_api.h
+  signbit_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: signbit_tile}}
+    stateful: true
+    header: api/compute/compute_kernel_api.h
+  signbit_tile_int32:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: signbit_tile_int32}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/compute_kernel_api.h
+  signbit_tile_int32_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: signbit_tile_int32}}
+    stateful: true
+    header: api/compute/compute_kernel_api.h
+  silu_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: silu_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/compute_kernel_api.h
+  silu_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: silu_tile}}
+    stateful: true
+    header: api/compute/compute_kernel_api.h
+  sin_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: sin_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/trigonometry.h
+  sin_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: sin_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/trigonometry.h
+  sinh_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: sinh_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/trigonometry.h
+  sinh_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: sinh_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/trigonometry.h
+  snake_beta_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: snake_beta_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, idst2: 2, odst: 3}
+    header: api/compute/eltwise_unary/snake_beta.h
+  snake_beta_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: snake_beta_tile}}
+    header: api/compute/eltwise_unary/snake_beta.h
+  softcap_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: softcap_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/softcap.h
+  softcap_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: softcap_tile}}
+    header: api/compute/eltwise_unary/softcap.h
+  softplus_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: softplus_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/softplus.h
+  softplus_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: softplus_tile}}
+    header: api/compute/eltwise_unary/softplus.h
+  softshrink_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: softshrink_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/activations.h
+  softshrink_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: softshrink_tile}}
+    header: api/compute/eltwise_unary/activations.h
+  softsign_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: softsign_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/activations.h
+  softsign_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: softsign_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/activations.h
+  sqrt_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: sqrt_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/sqrt.h
+  sqrt_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: sqrt_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/sqrt.h
+  square_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: square_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/compute_kernel_api.h
+  square_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: square_tile}}
+    header: api/compute/compute_kernel_api.h
+  stochastic_round_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: rounding_op}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/rounding.h
+  sub_unary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: binop_with_scalar}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/binop_with_scalar.h
+  sub_unary_tile_int32:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: binop_with_scalar}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/binop_with_scalar.h
+  tan_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: tan_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/trigonometry.h
+  tan_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: tan_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/trigonometry.h
+  tanh_derivative_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: tanh_derivative_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/tanh_derivative.h
+  tanh_derivative_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: tanh_derivative_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/tanh_derivative.h
+  tanh_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: tanh_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/compute_kernel_api.h
+  tanh_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: tanh_tile}}
+    stateful: true
+    header: api/compute/compute_kernel_api.h
+  tanhshrink_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: tanhshrink_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/tanhshrink.h
+  tanhshrink_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: tanhshrink_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/tanhshrink.h
+  threshold_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: threshold_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/threshold.h
+  threshold_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: threshold_tile}}
+    header: api/compute/eltwise_unary/threshold.h
+  tiled_prod_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: tiled_prod_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/compute_kernel_api.h
+  tiled_prod_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: tiled_prod_tile}}
+    header: api/compute/compute_kernel_api.h
+  trunc_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: rounding_op}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/rounding.h
+  typecast_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: typecast_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/typecast.h
+  typecast_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: typecast_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/typecast.h
+  unary_eq_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: unary_eq_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/comp.h
+  unary_eq_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: unary_eq_tile}}
+    header: api/compute/eltwise_unary/comp.h
+  unary_eq_tile_int32:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: unary_eq_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/comp.h
+  unary_ge_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: unary_ge_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/comp.h
+  unary_ge_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: unary_ge_tile}}
+    header: api/compute/eltwise_unary/comp.h
+  unary_ge_tile_int32:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: unary_ge_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/comp.h
+  unary_gt_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: unary_gt_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/comp.h
+  unary_gt_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: unary_gt_tile}}
+    header: api/compute/eltwise_unary/comp.h
+  unary_gt_tile_int32:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: unary_gt_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/comp.h
+  unary_le_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: unary_le_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/comp.h
+  unary_le_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: unary_le_tile}}
+    header: api/compute/eltwise_unary/comp.h
+  unary_le_tile_int32:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: unary_le_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/comp.h
+  unary_lt_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: unary_lt_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/comp.h
+  unary_lt_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: unary_lt_tile}}
+    header: api/compute/eltwise_unary/comp.h
+  unary_lt_tile_int32:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: unary_lt_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/comp.h
+  unary_max_int32_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: unary_max_int32_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/compute_kernel_api.h
+  unary_max_int32_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: unary_max_int32_tile}}
+    stateful: true
+    header: api/compute/compute_kernel_api.h
+  unary_max_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: unary_max_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/compute_kernel_api.h
+  unary_max_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: unary_max_tile}}
+    stateful: true
+    header: api/compute/compute_kernel_api.h
+  unary_max_uint32_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: unary_max_uint32_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/compute_kernel_api.h
+  unary_max_uint32_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: unary_max_uint32_tile}}
+    stateful: true
+    header: api/compute/compute_kernel_api.h
+  unary_min_int32_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: unary_min_int32_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/compute_kernel_api.h
+  unary_min_int32_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: unary_min_int32_tile}}
+    stateful: true
+    header: api/compute/compute_kernel_api.h
+  unary_min_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: unary_min_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/compute_kernel_api.h
+  unary_min_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: unary_min_tile}}
+    stateful: true
+    header: api/compute/compute_kernel_api.h
+  unary_min_uint32_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: unary_min_uint32_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/compute_kernel_api.h
+  unary_min_uint32_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: unary_min_uint32_tile}}
+    stateful: true
+    header: api/compute/compute_kernel_api.h
+  unary_ne_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: unary_ne_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/comp.h
+  unary_ne_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: unary_ne_tile}}
+    header: api/compute/eltwise_unary/comp.h
+  unary_ne_tile_int32:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: unary_ne_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/comp.h
+  where_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: where_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, idst2: 2, odst: 3}
+    header: api/compute/eltwise_unary/where.h
+  where_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: where_tile}}
+    header: api/compute/eltwise_unary/where.h
+  xielu_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: xielu_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/eltwise_unary/xielu.h
+  xielu_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: xielu_tile}}
+    stateful: true
+    header: api/compute/eltwise_unary/xielu.h
+
+  # === SFPU Pack-Thread Ops (PACK) (22) ===
+  exp_packthread_tile:
+    kind: op
+    threads: [pack]
+    exu: {sfpu_pack: {require: exp_packthread_tile}}
+    resources: {dst_pack: {require: held}}
+    args: {idst: 0}
+    targs: {approx: 0, input_clamping: 2}
+    arch: [wh, bh]
+    header: api/compute/eltwise_unary/exp.h
+  exp_packthread_tile_init:
+    kind: init
+    threads: [pack]
+    exu: {sfpu_pack: {require: clean, set: exp_packthread_tile}}
+    targs: {approx: 0, input_clamping: 2}
+    stateful: true
+    arch: [wh, bh]
+    header: api/compute/eltwise_unary/exp.h
+  gelu_tanh_tile_init_pack:
+    kind: init
+    threads: [pack]
+    exu: {sfpu_pack: {require: clean, set: gelu_tanh_tile_pack}}
+    stateful: true
+    arch: [wh, bh]
+    header: api/compute/eltwise_unary/gelu.h
+  gelu_tanh_tile_pack:
+    kind: op
+    threads: [pack]
+    exu: {sfpu_pack: {require: gelu_tanh_tile_pack}}
+    resources: {dst_pack: {require: held}}
+    args: {idst: 0}
+    arch: [wh, bh]
+    header: api/compute/eltwise_unary/gelu.h
+  gelu_tile_init_pack:
+    kind: init
+    threads: [pack]
+    exu: {sfpu_pack: {require: clean, set: gelu_tile_pack}}
+    stateful: true
+    arch: [wh, bh]
+    header: api/compute/eltwise_unary/gelu.h
+  gelu_tile_pack:
+    kind: op
+    threads: [pack]
+    exu: {sfpu_pack: {require: gelu_tile_pack}}
+    resources: {dst_pack: {require: held}}
+    args: {idst: 0}
+    arch: [wh, bh]
+    header: api/compute/eltwise_unary/gelu.h
+  hardsigmoid_tile_init_pack:
+    kind: init
+    threads: [pack]
+    exu: {sfpu_pack: {require: clean, set: hardsigmoid_tile_pack}}
+    stateful: true
+    arch: [wh, bh]
+    header: api/compute/eltwise_unary/activations.h
+  hardsigmoid_tile_pack:
+    kind: op
+    threads: [pack]
+    exu: {sfpu_pack: {require: hardsigmoid_tile_pack}}
+    resources: {dst_pack: {require: held}}
+    args: {idst: 0}
+    arch: [wh, bh]
+    header: api/compute/eltwise_unary/activations.h
+  hardtanh_tile_init_pack:
+    kind: init
+    threads: [pack]
+    exu: {sfpu_pack: {require: clean, set: hardtanh_tile_pack}}
+    arch: [wh, bh]
+    header: api/compute/eltwise_unary/hardtanh.h
+  hardtanh_tile_pack:
+    kind: op
+    threads: [pack]
+    exu: {sfpu_pack: {require: hardtanh_tile_pack}}
+    resources: {dst_pack: {require: held}}
+    args: {idst: 0}
+    arch: [wh, bh]
+    header: api/compute/eltwise_unary/hardtanh.h
+  relu_max_tile_init_pack:
+    kind: init
+    threads: [pack]
+    exu: {sfpu_pack: {require: clean, set: relu_max_tile_pack}}
+    arch: [wh, bh]
+    header: api/compute/eltwise_unary/relu.h
+  relu_max_tile_pack:
+    kind: op
+    threads: [pack]
+    exu: {sfpu_pack: {require: relu_max_tile_pack}}
+    resources: {dst_pack: {require: held}}
+    args: {idst: 0}
+    arch: [wh, bh]
+    header: api/compute/eltwise_unary/relu.h
+  selu_tile_init_pack:
+    kind: init
+    threads: [pack]
+    exu: {sfpu_pack: {require: clean, set: selu_tile_pack}}
+    arch: [wh, bh]
+    header: api/compute/eltwise_unary/selu.h
+  selu_tile_pack:
+    kind: op
+    threads: [pack]
+    exu: {sfpu_pack: {require: selu_tile_pack}}
+    resources: {dst_pack: {require: held}}
+    args: {idst: 0}
+    arch: [wh, bh]
+    header: api/compute/eltwise_unary/selu.h
+  sigmoid_tile_init_pack:
+    kind: init
+    threads: [pack]
+    exu: {sfpu_pack: {require: clean, set: sigmoid_tile_pack}}
+    stateful: true
+    arch: [wh, bh]
+    header: api/compute/compute_kernel_api.h
+  sigmoid_tile_pack:
+    kind: op
+    threads: [pack]
+    exu: {sfpu_pack: {require: sigmoid_tile_pack}}
+    resources: {dst_pack: {require: held}}
+    args: {idst: 0}
+    arch: [wh, bh]
+    header: api/compute/compute_kernel_api.h
+  silu_tile_init_pack:
+    kind: init
+    threads: [pack]
+    exu: {sfpu_pack: {require: clean, set: silu_tile_pack}}
+    stateful: true
+    arch: [wh, bh]
+    header: api/compute/compute_kernel_api.h
+  silu_tile_pack:
+    kind: op
+    threads: [pack]
+    exu: {sfpu_pack: {require: silu_tile_pack}}
+    resources: {dst_pack: {require: held}}
+    args: {idst: 0}
+    arch: [wh, bh]
+    header: api/compute/compute_kernel_api.h
+  softplus_tile_init_pack:
+    kind: init
+    threads: [pack]
+    exu: {sfpu_pack: {require: clean, set: softplus_tile_pack}}
+    arch: [wh, bh]
+    header: api/compute/eltwise_unary/softplus.h
+  softplus_tile_pack:
+    kind: op
+    threads: [pack]
+    exu: {sfpu_pack: {require: softplus_tile_pack}}
+    resources: {dst_pack: {require: held}}
+    args: {idst: 0}
+    arch: [wh, bh]
+    header: api/compute/eltwise_unary/softplus.h
+  tanh_tile_init_pack:
+    kind: init
+    threads: [pack]
+    exu: {sfpu_pack: {require: clean, set: tanh_tile_pack}}
+    stateful: true
+    arch: [wh, bh]
+    header: api/compute/compute_kernel_api.h
+  tanh_tile_pack:
+    kind: op
+    threads: [pack]
+    exu: {sfpu_pack: {require: tanh_tile_pack}}
+    resources: {dst_pack: {require: held}}
+    args: {idst: 0}
+    arch: [wh, bh]
+    header: api/compute/compute_kernel_api.h
+
+  # === SFPU Eltwise Binary & Broadcast (MATH) (123) ===
+  add_binary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: add_binary_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/eltwise_binary_sfpu.h
+  add_binary_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: add_binary_tile}}
+    stateful: true
+    header: api/compute/eltwise_binary_sfpu.h
+  add_int_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: add_int_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/add_int_sfpu.h
+  add_int_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: add_int_tile}}
+    header: api/compute/add_int_sfpu.h
+  atan2_binary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: atan2_binary_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/atan2.h
+  atan2_binary_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: atan2_binary_tile}}
+    stateful: true
+    header: api/compute/atan2.h
+  binary_bitwise_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: binary_bitwise}}
+    header: api/compute/binary_bitwise_sfpu.h
+  binary_left_shift_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: binary_shift}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/binary_shift.h
+  binary_logical_right_shift_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: binary_shift}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/binary_shift.h
+  binary_max_int32_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: binary_max_int32_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/binary_max_min.h
+  binary_max_int32_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: binary_max_int32_tile}}
+    stateful: true
+    header: api/compute/binary_max_min.h
+  binary_max_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: binary_max_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/binary_max_min.h
+  binary_max_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: binary_max_tile}}
+    stateful: true
+    header: api/compute/binary_max_min.h
+  binary_max_uint32_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: binary_max_uint32_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/binary_max_min.h
+  binary_max_uint32_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: binary_max_uint32_tile}}
+    stateful: true
+    header: api/compute/binary_max_min.h
+  binary_min_int32_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: binary_min_int32_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/binary_max_min.h
+  binary_min_int32_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: binary_min_int32_tile}}
+    stateful: true
+    header: api/compute/binary_max_min.h
+  binary_min_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: binary_min_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/binary_max_min.h
+  binary_min_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: binary_min_tile}}
+    stateful: true
+    header: api/compute/binary_max_min.h
+  binary_min_uint32_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: binary_min_uint32_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/binary_max_min.h
+  binary_min_uint32_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: binary_min_uint32_tile}}
+    stateful: true
+    header: api/compute/binary_max_min.h
+  binary_right_shift_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: binary_shift}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/binary_shift.h
+  binary_shift_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: binary_shift}}
+    header: api/compute/binary_shift.h
+  bitwise_and_binary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: binary_bitwise}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/binary_bitwise_sfpu.h
+  bitwise_or_binary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: binary_bitwise}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/binary_bitwise_sfpu.h
+  bitwise_xor_binary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: binary_bitwise}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/binary_bitwise_sfpu.h
+  clamped_silu_glu_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: clamped_silu_glu_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/clamped_silu_glu.h
+  clamped_silu_glu_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: clamped_silu_glu_tile}}
+    stateful: true
+    header: api/compute/clamped_silu_glu.h
+  div_binary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: div_binary_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/eltwise_binary_sfpu.h
+  div_binary_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: div_binary_tile}}
+    stateful: true
+    header: api/compute/eltwise_binary_sfpu.h
+  div_int32_floor_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: div_int32_floor_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/div_int32_floor.h
+  div_int32_floor_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: div_int32_floor_tile}}
+    stateful: true
+    header: api/compute/div_int32_floor.h
+  div_int32_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: div_int32_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/div_int32_sfpu.h
+  div_int32_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: div_int32_tile}}
+    stateful: true
+    header: api/compute/div_int32_sfpu.h
+  div_int32_trunc_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: div_int32_trunc_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/div_int32_floor.h
+  div_int32_trunc_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: div_int32_trunc_tile}}
+    stateful: true
+    header: api/compute/div_int32_floor.h
+  eq_binary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: eq_binary_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/eltwise_binary_sfpu.h
+  eq_binary_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: eq_binary_tile}}
+    header: api/compute/eltwise_binary_sfpu.h
+  eq_int_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: eq_int_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/binary_comp.h
+  eq_int_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: eq_int_tile}}
+    header: api/compute/binary_comp.h
+  fmod_binary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: fmod_binary_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/binary_fmod.h
+  fmod_binary_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: fmod_binary_tile}}
+    stateful: true
+    header: api/compute/binary_fmod.h
+  fmod_int32_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: fmod_int32_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/binary_fmod.h
+  fmod_int32_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: fmod_int32_tile}}
+    stateful: true
+    header: api/compute/binary_fmod.h
+  gcd_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: gcd_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/gcd.h
+  gcd_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: gcd_tile}}
+    stateful: true
+    header: api/compute/gcd.h
+  ge_binary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: ge_binary_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/eltwise_binary_sfpu.h
+  ge_binary_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: ge_binary_tile}}
+    header: api/compute/eltwise_binary_sfpu.h
+  ge_int_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: ge_int_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/binary_comp.h
+  ge_int_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: ge_int_tile}}
+    header: api/compute/binary_comp.h
+  gt_binary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: gt_binary_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/eltwise_binary_sfpu.h
+  gt_binary_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: gt_binary_tile}}
+    header: api/compute/eltwise_binary_sfpu.h
+  gt_int_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: gt_int_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/binary_comp.h
+  gt_int_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: gt_int_tile}}
+    header: api/compute/binary_comp.h
+  isclose_binary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: isclose_binary_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/isclose.h
+  isclose_binary_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: isclose_binary_tile}}
+    stateful: true
+    header: api/compute/isclose.h
+  lcm_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: lcm_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/lcm.h
+  lcm_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: lcm_tile}}
+    stateful: true
+    header: api/compute/lcm.h
+  le_binary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: le_binary_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/eltwise_binary_sfpu.h
+  le_binary_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: le_binary_tile}}
+    header: api/compute/eltwise_binary_sfpu.h
+  le_int_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: le_int_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/binary_comp.h
+  le_int_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: le_int_tile}}
+    header: api/compute/binary_comp.h
+  logaddexp2_binary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: logaddexp2_binary_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/logaddexp2.h
+  logaddexp2_binary_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: logaddexp2_binary_tile}}
+    stateful: true
+    header: api/compute/logaddexp2.h
+  logaddexp_binary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: logaddexp_binary_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/logaddexp.h
+  logaddexp_binary_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: logaddexp_binary_tile}}
+    stateful: true
+    header: api/compute/logaddexp.h
+  lt_binary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: lt_binary_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/eltwise_binary_sfpu.h
+  lt_binary_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: lt_binary_tile}}
+    header: api/compute/eltwise_binary_sfpu.h
+  lt_int_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: lt_int_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/binary_comp.h
+  lt_int_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: lt_int_tile}}
+    header: api/compute/binary_comp.h
+  mul_binary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: mul_binary_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/eltwise_binary_sfpu.h
+  mul_binary_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: mul_binary_tile}}
+    stateful: true
+    header: api/compute/eltwise_binary_sfpu.h
+  mul_int_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: mul_int_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/mul_int_sfpu.h
+  mul_int_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: mul_int_tile}}
+    stateful: true
+    header: api/compute/mul_int_sfpu.h
+  ne_binary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: ne_binary_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/eltwise_binary_sfpu.h
+  ne_binary_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: ne_binary_tile}}
+    header: api/compute/eltwise_binary_sfpu.h
+  ne_int_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: ne_int_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/binary_comp.h
+  ne_int_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: ne_int_tile}}
+    header: api/compute/binary_comp.h
+  nextafter_bf16_binary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: nextafter_bf16_binary_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/nextafter.h
+  nextafter_bf16_binary_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: nextafter_bf16_binary_tile}}
+    stateful: true
+    header: api/compute/nextafter.h
+  nextafter_binary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: nextafter_binary_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/nextafter.h
+  nextafter_binary_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: nextafter_binary_tile}}
+    stateful: true
+    header: api/compute/nextafter.h
+  power_binary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: power_binary_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/eltwise_binary_sfpu.h
+  power_binary_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: power_binary_tile}}
+    stateful: true
+    header: api/compute/eltwise_binary_sfpu.h
+  remainder_binary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: remainder_binary_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/binary_remainder.h
+  remainder_binary_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: remainder_binary_tile}}
+    stateful: true
+    header: api/compute/binary_remainder.h
+  remainder_int32_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: remainder_int32_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/binary_remainder.h
+  remainder_int32_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: remainder_int32_tile}}
+    stateful: true
+    header: api/compute/binary_remainder.h
+  remainder_uint32_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: remainder_uint32_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/binary_remainder.h
+  remainder_uint32_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: remainder_uint32_tile}}
+    stateful: true
+    header: api/compute/binary_remainder.h
+  rsub_binary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: rsub_binary_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/eltwise_binary_sfpu.h
+  rsub_binary_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: rsub_binary_tile}}
+    stateful: true
+    header: api/compute/eltwise_binary_sfpu.h
+  rsub_int_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: rsub_int_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/sub_int_sfpu.h
+  rsub_int_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: rsub_int_tile}}
+    header: api/compute/sub_int_sfpu.h
+  sfpu_add_bcast_col:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: [sfpu_bcast_col, sfpu_bcast_generic]}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1}
+    arch: [wh, bh]
+    header: api/compute/sfpu_binary_bcast.h
+  sfpu_add_bcast_col_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: sfpu_bcast_col}}
+    stateful: true
+    arch: [wh, bh]
+    header: api/compute/sfpu_binary_bcast.h
+  sfpu_add_bcast_row:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: [sfpu_bcast_row, sfpu_bcast_generic]}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1}
+    arch: [wh, bh]
+    header: api/compute/sfpu_binary_bcast.h
+  sfpu_add_bcast_row_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: sfpu_bcast_row}}
+    stateful: true
+    arch: [wh, bh]
+    header: api/compute/sfpu_binary_bcast.h
+  sfpu_bcast:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: [sfpu_bcast_col, sfpu_bcast_row, sfpu_bcast_generic]}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1}
+    arch: [wh, bh]
+    header: api/compute/sfpu_binary_bcast.h
+  sfpu_bcast_col_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: sfpu_bcast_col}}
+    stateful: true
+    arch: [wh, bh]
+    header: api/compute/sfpu_binary_bcast.h
+  sfpu_bcast_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: sfpu_bcast_generic}}
+    stateful: true
+    arch: [wh, bh]
+    header: api/compute/sfpu_binary_bcast.h
+  sfpu_bcast_row_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: sfpu_bcast_row}}
+    stateful: true
+    arch: [wh, bh]
+    header: api/compute/sfpu_binary_bcast.h
+  sfpu_mul_bcast_col:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: [sfpu_bcast_col, sfpu_bcast_generic]}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1}
+    arch: [wh, bh]
+    header: api/compute/sfpu_binary_bcast.h
+  sfpu_mul_bcast_col_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: sfpu_bcast_col}}
+    stateful: true
+    arch: [wh, bh]
+    header: api/compute/sfpu_binary_bcast.h
+  sfpu_mul_bcast_row:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: [sfpu_bcast_row, sfpu_bcast_generic]}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1}
+    arch: [wh, bh]
+    header: api/compute/sfpu_binary_bcast.h
+  sfpu_mul_bcast_row_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: sfpu_bcast_row}}
+    stateful: true
+    arch: [wh, bh]
+    header: api/compute/sfpu_binary_bcast.h
+  sfpu_normalize_bcast_col:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: [sfpu_bcast_col, sfpu_bcast_generic]}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, idst2: 2}
+    arch: [wh, bh]
+    header: api/compute/sfpu_binary_bcast.h
+  sfpu_normalize_bcast_col_two_tiles:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: [sfpu_bcast_col, sfpu_bcast_generic]}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, idst2: 3}
+    arch: [wh, bh]
+    header: api/compute/sfpu_binary_bcast.h
+  sfpu_normalize_bcast_scalar:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: [sfpu_bcast_row, sfpu_bcast_generic]}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, idst2: 2}
+    arch: [wh, bh]
+    header: api/compute/sfpu_binary_bcast.h
+  sfpu_normalize_bcast_scalar_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: sfpu_bcast_row}}
+    stateful: true
+    arch: [wh, bh]
+    header: api/compute/sfpu_binary_bcast.h
+  sfpu_residual_normalize_bcast_col:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: [sfpu_bcast_col, sfpu_bcast_generic]}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, idst2: 3}
+    arch: [wh, bh]
+    header: api/compute/sfpu_binary_bcast.h
+  sfpu_sub_bcast_col:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: [sfpu_bcast_col, sfpu_bcast_generic]}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1}
+    arch: [wh, bh]
+    header: api/compute/sfpu_binary_bcast.h
+  sfpu_sub_bcast_col_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: sfpu_bcast_col}}
+    stateful: true
+    arch: [wh, bh]
+    header: api/compute/sfpu_binary_bcast.h
+  sfpu_sub_bcast_row:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: [sfpu_bcast_row, sfpu_bcast_generic]}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1}
+    arch: [wh, bh]
+    header: api/compute/sfpu_binary_bcast.h
+  sfpu_sub_bcast_row_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: sfpu_bcast_row}}
+    stateful: true
+    arch: [wh, bh]
+    header: api/compute/sfpu_binary_bcast.h
+  situ_glu_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: situ_glu_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/situ_glu.h
+  situ_glu_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: situ_glu_tile}}
+    stateful: true
+    header: api/compute/situ_glu.h
+  sub_binary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: sub_binary_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/eltwise_binary_sfpu.h
+  sub_binary_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: sub_binary_tile}}
+    stateful: true
+    header: api/compute/eltwise_binary_sfpu.h
+  sub_int_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: sub_int_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/sub_int_sfpu.h
+  sub_int_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: sub_int_tile}}
+    header: api/compute/sub_int_sfpu.h
+  xlogy_binary_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: xlogy_binary_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/xlogy.h
+  xlogy_binary_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: xlogy_binary_tile}}
+    stateful: true
+    header: api/compute/xlogy.h
+
+  # === SFPU Specialized (Quantization, TopK, Welford, EMA, Misc) (71) ===
+  copy_dest_values:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: copy_dest_values}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, odst: 1}
+    header: api/compute/copy_dest_values.h
+  copy_dest_values_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: copy_dest_values}}
+    stateful: true
+    header: api/compute/copy_dest_values.h
+  cumsum_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: cumsum_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/cumsum.h
+  cumsum_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: cumsum_tile}}
+    stateful: true
+    header: api/compute/cumsum.h
+  dequant_int8_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: dequant_int8_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/quantization.h
+  dequant_int8_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: dequant_int8_tile}}
+    stateful: true
+    header: api/compute/quantization.h
+  dequant_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: dequant_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/quantization.h
+  dequant_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: dequant_tile}}
+    stateful: true
+    header: api/compute/quantization.h
+  ema_clear_previous_output:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: ema}}
+    resources: {dst_math: {require: held}}
+    header: api/compute/ema.h
+  ema_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: ema}}
+    stateful: true
+    header: api/compute/ema.h
+  ema_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: ema}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/ema.h
+  mask_posinf_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: mask_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1}
+    header: api/compute/mask.h
+  mask_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: mask_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1}
+    header: api/compute/mask.h
+  mask_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: mask_tile}}
+    header: api/compute/mask.h
+  quant_int8_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: quant_int8_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/quantization.h
+  quant_int8_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: quant_int8_tile}}
+    stateful: true
+    header: api/compute/quantization.h
+  quant_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: quant_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/quantization.h
+  quant_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: quant_tile}}
+    stateful: true
+    header: api/compute/quantization.h
+  quant_uint8_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: quant_tile}}
+    stateful: true
+    header: api/compute/quantization.h
+  requant_int8_in_int8_out_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: requant_int8_in_int8_out_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/quantization.h
+  requant_int8_in_int8_out_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: requant_int8_in_int8_out_tile}}
+    stateful: true
+    header: api/compute/quantization.h
+  requant_int8_in_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: requant_int8_in_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/quantization.h
+  requant_int8_in_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: requant_int8_in_tile}}
+    stateful: true
+    header: api/compute/quantization.h
+  requant_int8_in_uint8_out_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: requant_int8_in_tile}}
+    stateful: true
+    header: api/compute/quantization.h
+  requant_int8_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: requant_int8_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/quantization.h
+  requant_int8_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: requant_int8_tile}}
+    stateful: true
+    header: api/compute/quantization.h
+  requant_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: requant_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst0: 0, idst1: 1, odst: 2}
+    header: api/compute/quantization.h
+  requant_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: requant_tile}}
+    stateful: true
+    header: api/compute/quantization.h
+  requant_uint8_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: requant_tile}}
+    stateful: true
+    header: api/compute/quantization.h
+  reshuffle_rows_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: reshuffle_rows_tile}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/reshuffle.h
+  reshuffle_rows_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: reshuffle_rows_tile}}
+    header: api/compute/reshuffle.h
+  topk_canonicalize_negzero_values:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: topk}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/topk.h
+  topk_defuse_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: topk}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/topk.h
+  topk_finalize_uint16_indices:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: topk}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/topk.h
+  topk_fuse_tile:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: topk}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/topk.h
+  topk_local_sort:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: topk}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/topk.h
+  topk_merge:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: topk}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/topk.h
+  topk_rebuild:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: topk}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/topk.h
+  topk_stamp_local_positions:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: topk}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/topk.h
+  topk_stamp_tile_rank_range:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: topk}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/topk.h
+  topk_strip_rank_tags:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: topk}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/topk.h
+  topk_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: topk}}
+    stateful: true
+    header: api/compute/topk.h
+  topk_uint16_move_dest_tile_to_pack_half:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: topk}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/topk.h
+  topk_uint16_prepare_value_tile_for_pack:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: topk}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/topk.h
+  triangle_solve_tile:
+    kind: op
+    threads: [unpack, math, pack]
+    exu: {sfpu: {require: triangle_solve_tile}}
+    resources: {dst_math: {require: held}, cb_in: {require: ready}}
+    args: {cb: 0, idst0: 2, odst: 3}
+    arch: [bh]
+    header: api/compute/triangle_solve.h
+  triangle_solve_tile_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: triangle_solve_tile}}
+    stateful: true
+    arch: [bh]
+    header: api/compute/triangle_solve.h
+  two_pass_stats_clear:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: two_pass_stats}}
+    resources: {dst_math: {require: held}}
+    header: api/compute/welford.h
+  two_pass_stats_combine_block:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: two_pass_stats}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/welford.h
+  two_pass_stats_finalize_and_combine_to_face:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: two_pass_stats}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/welford.h
+  two_pass_stats_finalize_split_mean_to_row:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: two_pass_stats}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/welford.h
+  two_pass_stats_finalize_to_face:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: two_pass_stats}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/welford.h
+  two_pass_stats_finalize_to_row:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: two_pass_stats}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/welford.h
+  two_pass_stats_finish_shifted_mean:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: two_pass_stats}}
+    resources: {dst_math: {require: held}}
+    header: api/compute/welford.h
+  two_pass_stats_init_shifted:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: two_pass_stats}}
+    stateful: true
+    header: api/compute/welford.h
+  two_pass_stats_restore_anchor:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: two_pass_stats}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/welford.h
+  two_pass_stats_restore_anchor_from_state:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: two_pass_stats}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/welford.h
+  two_pass_stats_save_anchor:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: two_pass_stats}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/welford.h
+  two_pass_stats_save_anchor_to_state:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: two_pass_stats}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/welford.h
+  two_pass_stats_save_state:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: two_pass_stats}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/welford.h
+  two_pass_stats_switch_group:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: two_pass_stats}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/welford.h
+  two_pass_stats_update_rows:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: two_pass_stats}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/welford.h
+  two_pass_stats_update_shifted_rows:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: two_pass_stats}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/welford.h
+  welford_clear:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: welford}}
+    resources: {dst_math: {require: held}}
+    header: api/compute/welford.h
+  welford_finalize_to_face:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: welford}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/welford.h
+  welford_finalize_to_row:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: welford}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/welford.h
+  welford_init:
+    kind: init
+    threads: [math]
+    exu: {sfpu: {require: clean, set: welford}}
+    stateful: true
+    header: api/compute/welford.h
+  welford_reinit:
+    kind: init
+    threads: [unpack, math]
+    exu: {unpack: {require: clean, set: copy}, fpu: {require: clean, set: copy}, sfpu: {require: welford}}
+    args: {icb0: 0}
+    arch: [wh, bh]
+    header: api/compute/welford.h
+  welford_restore_state:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: welford}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/welford.h
+  welford_save_state:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: welford}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/welford.h
+  welford_update:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: welford}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/welford.h
+  welford_update_rows:
+    kind: op
+    threads: [math]
+    exu: {sfpu: {require: welford}}
+    resources: {dst_math: {require: held}}
+    args: {idst: 0}
+    header: api/compute/welford.h
+
+  # === Dataflow NoC & Barriers (54) ===
+  noc_async_read_set_state:
+    kind: init
+    threads: [dm]
+    exu: {noc_rd_state: {require: clean, set: read_state}}
+    args: {noc: 1}
+    header: api/dataflow/dataflow_api.h
+  noc_async_read_one_packet_set_state:
+    kind: init
+    threads: [dm]
+    exu: {noc_rd_state: {require: clean, set: read_one_packet_state}}
+    args: {noc: 3}
+    header: api/dataflow/dataflow_api.h
+  noc_async_read_set_trid:
+    kind: reconfig
+    threads: [dm]
+    args: {trid: 0, noc: 1}
+    header: api/dataflow/dataflow_api.h
+  noc_async_read_set_pcie_state:
+    kind: init
+    threads: [dm]
+    exu: {noc_rd_state: {require: [clean, read_pcie_state], set: read_pcie_state, dirty: true}}
+    uninit: noc_async_read_clear_pcie_state
+    args: {noc: 1}
+    header: api/dataflow/dataflow_api.h
+  noc_async_read_clear_pcie_state:
+    kind: uninit
+    threads: [dm]
+    exu: {noc_rd_state: {require: read_pcie_state, set: idle}}
+    args: {noc: 0}
+    header: api/dataflow/dataflow_api.h
+  noc_async_read:
+    kind: acquire
+    threads: [dm]
+    resources: {noc_rd: {set: in_flight}}
+    args: {noc: 3}
+    header: api/dataflow/dataflow_api.h
+  noc_async_read_one_packet:
+    kind: acquire
+    threads: [dm]
+    resources: {noc_rd: {set: in_flight}}
+    args: {noc: 3}
+    header: api/dataflow/dataflow_api.h
+  noc_async_read_pcie:
+    kind: acquire
+    threads: [dm]
+    resources: {noc_rd: {set: in_flight}}
+    args: {noc: 3}
+    header: api/dataflow/dataflow_api.h
+  noc_async_read_shard:
+    kind: acquire
+    threads: [dm]
+    resources: {noc_rd: {set: in_flight}}
+    header: api/dataflow/dataflow_api.h
+  noc_async_read_page:
+    kind: acquire
+    threads: [dm]
+    resources: {noc_rd: {set: in_flight}}
+    header: api/dataflow/dataflow_api.h
+  noc_async_read_tile:
+    kind: acquire
+    threads: [dm]
+    resources: {noc_rd: {set: in_flight}}
+    deprecated: true
+    header: api/dataflow/dataflow_api.h
+  noc_async_read_with_state:
+    kind: acquire
+    threads: [dm]
+    exu: {noc_rd_state: {require: [read_state, read_pcie_state]}}
+    resources: {noc_rd: {set: in_flight}}
+    args: {noc: 3}
+    header: api/dataflow/dataflow_api.h
+  noc_async_read_one_packet_with_state:
+    kind: acquire
+    threads: [dm]
+    exu: {noc_rd_state: {require: read_one_packet_state}}
+    resources: {noc_rd: {set: in_flight}}
+    args: {noc: 3}
+    header: api/dataflow/dataflow_api.h
+  noc_async_read_one_packet_with_state_with_trid:
+    kind: acquire
+    threads: [dm]
+    exu: {noc_rd_state: {require: read_one_packet_state}}
+    resources: {noc_rd: {set: in_flight}}
+    args: {trid: 3, noc: 4}
+    header: api/dataflow/dataflow_api.h
+  noc_async_write_set_state:
+    kind: init
+    threads: [dm]
+    exu: {noc_wr_state: {require: clean, set: write_state}}
+    args: {noc: 1}
+    header: api/dataflow/dataflow_api.h
+  noc_async_write_one_packet_set_state:
+    kind: init
+    threads: [dm]
+    exu: {noc_wr_state: {require: clean, set: write_one_packet_state}}
+    args: {noc: 2}
+    header: api/dataflow/dataflow_api.h
+  noc_async_write_one_packet_with_trid_set_state:
+    kind: init
+    threads: [dm]
+    exu: {noc_wr_state: {require: clean, set: write_one_packet_trid_state}}
+    args: {noc: 2}
+    header: api/dataflow/dataflow_api.h
+  noc_async_write_set_trid:
+    kind: reconfig
+    threads: [dm]
+    args: {trid: 0, noc: 1}
+    header: api/dataflow/dataflow_api.h
+  noc_async_write_set_pcie_state:
+    kind: init
+    threads: [dm]
+    exu: {noc_wr_state: {require: [clean, write_pcie_state], set: write_pcie_state, dirty: true}}
+    uninit: noc_async_write_clear_pcie_state
+    args: {noc: 1}
+    header: api/dataflow/dataflow_api.h
+  noc_async_write_clear_pcie_state:
+    kind: uninit
+    threads: [dm]
+    exu: {noc_wr_state: {require: write_pcie_state, set: idle}}
+    args: {noc: 0}
+    header: api/dataflow/dataflow_api.h
+  noc_inline_dw_write_set_state:
+    kind: init
+    threads: [dm]
+    exu: {noc_inline_state: {require: clean, set: inline_dw_state}}
+    args: {noc: 4}
+    header: api/dataflow/dataflow_api.h
+  noc_async_write:
+    kind: acquire
+    threads: [dm]
+    resources: {noc_wr: {set: in_flight}}
+    args: {noc: 3}
+    header: api/dataflow/dataflow_api.h
+  noc_async_write_one_packet:
+    kind: acquire
+    threads: [dm]
+    resources: {noc_wr: {set: in_flight}}
+    args: {noc: 3}
+    header: api/dataflow/dataflow_api.h
+  noc_async_write_one_packet_with_trid:
+    kind: acquire
+    threads: [dm]
+    resources: {noc_wr: {set: in_flight}}
+    args: {trid: 3, noc: 5}
+    header: api/dataflow/dataflow_api.h
+  noc_async_write_multicast:
+    kind: acquire
+    threads: [dm]
+    resources: {noc_wr: {set: in_flight}}
+    args: {noc: 5}
+    header: api/dataflow/dataflow_api.h
+  noc_async_write_multicast_loopback_src:
+    kind: acquire
+    threads: [dm]
+    resources: {noc_wr: {set: in_flight}}
+    args: {noc: 5}
+    header: api/dataflow/dataflow_api.h
+  noc_async_write_multicast_one_packet:
+    kind: acquire
+    threads: [dm]
+    resources: {noc_wr: {set: in_flight}}
+    args: {noc: 5}
+    header: api/dataflow/dataflow_api.h
+  noc_async_write_pcie:
+    kind: acquire
+    threads: [dm]
+    resources: {noc_wr: {set: in_flight}}
+    args: {noc: 3}
+    header: api/dataflow/dataflow_api.h
+  noc_async_write_shard:
+    kind: acquire
+    threads: [dm]
+    resources: {noc_wr: {set: in_flight}}
+    header: api/dataflow/dataflow_api.h
+  noc_async_write_page:
+    kind: acquire
+    threads: [dm]
+    resources: {noc_wr: {set: in_flight}}
+    header: api/dataflow/dataflow_api.h
+  noc_async_write_tile:
+    kind: acquire
+    threads: [dm]
+    resources: {noc_wr: {set: in_flight}}
+    deprecated: true
+    header: api/dataflow/dataflow_api.h
+  noc_async_write_with_state:
+    kind: acquire
+    threads: [dm]
+    exu: {noc_wr_state: {require: [write_state, write_pcie_state]}}
+    resources: {noc_wr: {set: in_flight}}
+    args: {noc: 3}
+    header: api/dataflow/dataflow_api.h
+  noc_async_write_one_packet_with_state:
+    kind: acquire
+    threads: [dm]
+    exu: {noc_wr_state: {require: write_one_packet_state}}
+    resources: {noc_wr: {set: in_flight}}
+    args: {noc: 2}
+    header: api/dataflow/dataflow_api.h
+  noc_async_write_one_packet_with_trid_with_state:
+    kind: acquire
+    threads: [dm]
+    exu: {noc_wr_state: {require: write_one_packet_trid_state}}
+    resources: {noc_wr: {set: in_flight}}
+    args: {trid: 3, noc: 5}
+    header: api/dataflow/dataflow_api.h
+  noc_inline_dw_write:
+    kind: acquire
+    threads: [dm]
+    resources: {noc_wr: {set: in_flight}}
+    args: {noc: 3}
+    header: api/dataflow/dataflow_api.h
+  noc_inline_mcast_dw_write:
+    kind: acquire
+    threads: [dm]
+    resources: {noc_wr: {set: in_flight}}
+    args: {noc: 3}
+    header: api/dataflow/dataflow_api.h
+  noc_inline_dw_write_with_state:
+    kind: acquire
+    threads: [dm]
+    exu: {noc_inline_state: {require: inline_dw_state}}
+    resources: {noc_wr: {set: in_flight}}
+    args: {noc: 3}
+    header: api/dataflow/dataflow_api.h
+  noc_semaphore_inc:
+    kind: acquire
+    threads: [dm]
+    resources: {noc_atomic: {set: in_flight}}
+    args: {noc: 2}
+    header: api/dataflow/dataflow_api.h
+  noc_semaphore_inc_multicast:
+    kind: acquire
+    threads: [dm]
+    resources: {noc_atomic: {set: in_flight}}
+    args: {noc: 3}
+    header: api/dataflow/dataflow_api.h
+  noc_semaphore_set_remote:
+    kind: acquire
+    threads: [dm]
+    resources: {noc_wr: {set: in_flight}}
+    args: {noc: 2}
+    header: api/dataflow/dataflow_api.h
+  noc_semaphore_set_multicast:
+    kind: acquire
+    threads: [dm]
+    resources: {noc_wr: {set: in_flight}}
+    args: {noc: 4}
+    header: api/dataflow/dataflow_api.h
+  noc_semaphore_set_multicast_loopback_src:
+    kind: acquire
+    threads: [dm]
+    resources: {noc_wr: {set: in_flight}}
+    args: {noc: 4}
+    header: api/dataflow/dataflow_api.h
+  noc_semaphore_set:
+    kind: op
+    threads: [dm]
+    header: api/dataflow/dataflow_api.h
+  noc_semaphore_wait:
+    kind: op
+    threads: [dm]
+    header: api/dataflow/dataflow_api.h
+  noc_semaphore_wait_min:
+    kind: op
+    threads: [dm]
+    header: api/dataflow/dataflow_api.h
+  noc_async_read_barrier:
+    kind: release
+    threads: [dm]
+    resources: {noc_rd: {set: idle}}
+    args: {noc: 0}
+    header: api/dataflow/dataflow_api.h
+  noc_async_read_barrier_with_trid:
+    kind: release
+    threads: [dm]
+    resources: {noc_rd: {set: idle}}
+    args: {trid: 0, noc: 1}
+    header: api/dataflow/dataflow_api.h
+  noc_async_write_barrier:
+    kind: release
+    threads: [dm]
+    resources: {noc_wr: {set: idle}}
+    args: {noc: 0}
+    header: api/dataflow/dataflow_api.h
+  noc_async_writes_flushed:
+    kind: release
+    threads: [dm]
+    resources: {noc_wr: {set: idle}}
+    args: {noc: 0}
+    header: api/dataflow/dataflow_api.h
+  noc_async_posted_writes_flushed:
+    kind: release
+    threads: [dm]
+    resources: {noc_wr: {set: idle}}
+    args: {noc: 0}
+    header: api/dataflow/dataflow_api.h
+  noc_async_write_barrier_with_trid:
+    kind: release
+    threads: [dm]
+    resources: {noc_wr: {set: idle}}
+    args: {trid: 0, noc: 1}
+    header: api/dataflow/dataflow_api.h
+  noc_async_write_flushed_with_trid:
+    kind: release
+    threads: [dm]
+    resources: {noc_wr: {set: idle}}
+    args: {trid: 0, noc: 1}
+    header: api/dataflow/dataflow_api.h
+  noc_async_atomic_barrier:
+    kind: release
+    threads: [dm]
+    resources: {noc_atomic: {set: idle}}
+    args: {noc: 0}
+    header: api/dataflow/dataflow_api.h
+  noc_async_full_barrier:
+    kind: release
+    threads: [dm]
+    resources: {noc_rd: {set: idle}, noc_wr: {set: idle}, noc_atomic: {set: idle}}
+    args: {noc: 0}
+    header: api/dataflow/dataflow_api.h
+
+  # === Experimental Compute (Verified Init/Uninit Contracts) (52) ===
+  custom_mm_block_init:
+    kind: init
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: clean, set: custom_mm}
+      fpu: {require: clean, set: custom_mm}
+      pack: {require: [clean, custom_mm_pack], set: custom_mm_pack, dirty: true}
+    uninit: custom_mm_block_uninit
+    args: {icb0: 0, icb1: 1, ocb: 2}
+    targs: {transpose: 0, layout: 1}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/custom_mm.h
+  custom_mm_block_init_short:
+    kind: init
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: clean, set: custom_mm}
+      fpu: {require: clean, set: custom_mm}
+      pack: {require: [clean, custom_mm_pack], set: custom_mm_pack, dirty: true}
+    uninit: custom_mm_block_uninit
+    args: {icb0: 0, icb1: 1, ocb: 2}
+    targs: {transpose: 0, layout: 1}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/custom_mm.h
+  custom_mm_block:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: custom_mm}, fpu: {require: custom_mm}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1}
+    targs: {layout: 0}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/custom_mm.h
+  custom_mm_block_unpack:
+    kind: op
+    threads: [unpack]
+    exu: {unpack: {require: custom_mm}}
+    args: {icb0: 0, icb1: 1}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/custom_mm.h
+  custom_mm_block_math:
+    kind: op
+    threads: [math]
+    exu: {fpu: {require: custom_mm}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1}
+    targs: {layout: 0}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/custom_mm.h
+  custom_mm_block_uninit:
+    kind: uninit
+    threads: [pack]
+    exu: {pack: {require: custom_mm_pack, set: idle}}
+    args: {ocb: 0}
+    targs: {layout: 0}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/custom_mm.h
+  compressed_custom_mm_block_init:
+    kind: init
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: clean, set: compressed_custom_mm}
+      fpu: {require: clean, set: compressed_custom_mm}
+      pack: {require: [clean, custom_mm_pack], set: custom_mm_pack, dirty: true}
+    uninit: compressed_custom_mm_block_uninit
+    args: {icb0: 0, icb1: 1, ocb: 2}
+    targs: {transpose: 0, layout: 1}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/compressed_custom_mm.h
+  compressed_custom_mm_block_init_short:
+    kind: init
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: clean, set: compressed_custom_mm}
+      fpu: {require: clean, set: compressed_custom_mm}
+      pack: {require: [clean, custom_mm_pack], set: custom_mm_pack, dirty: true}
+    uninit: compressed_custom_mm_block_uninit
+    args: {icb0: 0, icb1: 1, ocb: 2}
+    targs: {transpose: 0, layout: 1}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/compressed_custom_mm.h
+  compressed_custom_mm_block:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: compressed_custom_mm}, fpu: {require: compressed_custom_mm}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1}
+    targs: {layout: 0}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/compressed_custom_mm.h
+  compressed_custom_mm_block_unpack:
+    kind: op
+    threads: [unpack]
+    exu: {unpack: {require: compressed_custom_mm}}
+    args: {icb0: 0, icb1: 1}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/compressed_custom_mm.h
+  compressed_custom_mm_block_math:
+    kind: op
+    threads: [math]
+    exu: {fpu: {require: compressed_custom_mm}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1}
+    targs: {layout: 0}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/compressed_custom_mm.h
+  compressed_custom_mm_block_uninit:
+    kind: uninit
+    threads: [pack]
+    exu: {pack: {require: custom_mm_pack, set: idle}}
+    args: {ocb: 0}
+    targs: {layout: 0}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/compressed_custom_mm.h
+  face_compressed_mm_block_init_short:
+    kind: init
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: [clean, face_compressed_mm], set: face_compressed_mm, dirty: true}
+      fpu: {require: clean, set: face_compressed_mm}
+      pack: {require: [clean, face_compressed_mm_pack], set: face_compressed_mm_pack, dirty: true}
+    uninit: face_compressed_mm_block_uninit
+    args: {icb0: 0, icb1: 1, ocb: 2}
+    targs: {ct_dim: 0}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/face_compressed_mm.h
+  face_compressed_mm_block:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: face_compressed_mm}, fpu: {require: face_compressed_mm}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1}
+    targs: {ct_dim: 0}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/face_compressed_mm.h
+  face_compressed_mm_block_unpack:
+    kind: op
+    threads: [unpack]
+    exu: {unpack: {require: face_compressed_mm}}
+    args: {icb0: 0, icb1: 1}
+    targs: {ct_dim: 0}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/face_compressed_mm.h
+  face_compressed_mm_block_math:
+    kind: op
+    threads: [math]
+    exu: {fpu: {require: face_compressed_mm}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1}
+    targs: {ct_dim: 0}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/face_compressed_mm.h
+  face_compressed_mm_block_uninit:
+    kind: uninit
+    threads: [unpack, pack]
+    exu:
+      unpack: {require: face_compressed_mm, set: idle}
+      pack: {require: face_compressed_mm_pack, set: idle}
+    args: {icb0: 0, icb1: 1}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/face_compressed_mm.h
+  pack_init_mutex_ADC:
+    kind: init
+    threads: [pack]
+    exu: {pack: {require: clean, set: pack_mutex_adc}}
+    args: {ocb: 0}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/face_compressed_mm.h
+  pack_tile_mutex_ADC:
+    kind: op
+    threads: [pack]
+    exu: {pack: {require: [pack_mutex_adc, face_compressed_mm_pack]}}
+    resources: {dst_pack: {require: held}}
+    args: {idst: 0, ocb: 1}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/face_compressed_mm.h
+  custom_mm_reuse_dest_srcb_pack_init:
+    kind: init
+    threads: [pack]
+    exu: {pack: {require: [clean, custom_mm_reuse_pack], set: custom_mm_reuse_pack, dirty: true}}
+    uninit: custom_mm_reuse_dest_srcb_pack_uninit
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/custom_mm_reuse_dest_srcb.h
+  custom_mm_reuse_dest_srcb_pack_uninit:
+    kind: uninit
+    threads: [pack]
+    exu: {pack: {require: custom_mm_reuse_pack, set: idle}}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/custom_mm_reuse_dest_srcb.h
+  custom_mm_reuse_dest_srcb_replay_init:
+    kind: reconfig
+    threads: [math]
+    exu: {fpu: {require: started}}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/custom_mm_reuse_dest_srcb.h
+  custom_mm_reuse_dest_srcb_block_init_short:
+    kind: init
+    threads: [unpack, math]
+    exu:
+      unpack: {require: clean, set: custom_mm_reuse_dest_srcb}
+      fpu: {require: clean, set: custom_mm_reuse_dest_srcb}
+    args: {icb0: 0, icb1: 1}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/custom_mm_reuse_dest_srcb.h
+  custom_mm_reuse_dest_srcb_block:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: custom_mm_reuse_dest_srcb}, fpu: {require: custom_mm_reuse_dest_srcb}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/custom_mm_reuse_dest_srcb.h
+  fast_untilize_init:
+    kind: init
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: [clean, fast_untilize], set: fast_untilize, dirty: true}
+      fpu: {require: [clean, fast_untilize], set: fast_untilize, dirty: true}
+      pack: {require: [clean, fast_untilize], set: fast_untilize, dirty: true}
+    uninit: fast_untilize_uninit
+    args: {icb0: 0, ocb: 1}
+    targs: {full_ct_dim: 0}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/fast_untilize.h
+  fast_untilize_init_skip_remap:
+    kind: init
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: [clean, fast_untilize], set: fast_untilize, dirty: true}
+      fpu: {require: [clean, fast_untilize], set: fast_untilize, dirty: true}
+      pack: {require: [clean, fast_untilize], set: fast_untilize, dirty: true}
+    uninit: fast_untilize_uninit
+    args: {icb0: 0, ocb: 1}
+    targs: {full_ct_dim: 0}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/fast_untilize.h
+  fast_untilize_block:
+    kind: op
+    threads: [unpack, math, pack]
+    exu: {unpack: {require: fast_untilize}, fpu: {require: fast_untilize}, pack: {require: fast_untilize}}
+    resources: {dst_math: {require: free}, dst_pack: {require: free}}
+    args: {icb0: 0, ocb: 1}
+    targs: {full_ct_dim: 0}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/fast_untilize.h
+  fast_untilize_uninit:
+    kind: uninit
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: fast_untilize, set: idle}
+      fpu: {require: fast_untilize, set: idle}
+      pack: {require: fast_untilize, set: idle}
+    args: {ocb: 0}
+    targs: {full_ct_dim: 0}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/fast_untilize.h
+  hadamard_h128_init:
+    kind: init
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: clean, set: hadamard_h128}
+      fpu: {require: [clean, hadamard_h128], set: hadamard_h128, dirty: true}
+      pack: {require: clean, set: idle}
+    uninit: hadamard_h128_uninit
+    args: {icb0: 0, icb1: 1, ocb: 2}
+    targs: {normalize: 0}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/hadamard.h
+  hadamard_h128_init_short:
+    kind: init
+    threads: [unpack, math]
+    exu:
+      unpack: {require: clean, set: hadamard_h128}
+      fpu: {require: [clean, hadamard_h128], set: hadamard_h128, dirty: true}
+    uninit: hadamard_h128_uninit
+    args: {icb0: 0, icb1: 1}
+    targs: {normalize: 0}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/hadamard.h
+  hadamard_h128_tile:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: hadamard_h128}, fpu: {require: hadamard_h128}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1}
+    targs: {normalize: 0}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/hadamard.h
+  hadamard_h128_uninit:
+    kind: uninit
+    threads: [math]
+    exu: {fpu: {require: hadamard_h128, set: idle}}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/hadamard.h
+  mul_reduce_scalar_init:
+    kind: init
+    threads: [unpack, math]
+    exu: {unpack: {require: clean, set: mul_reduce_scalar}, fpu: {require: clean, set: mul_reduce_scalar}}
+    args: {icb0: 0, icb1: 1}
+    arch: [wh, bh]
+    experimental: true
+    header: api/compute/experimental/mul_reduce_scalar.h
+  mul_reduce_scalar_init_fidelity:
+    kind: init
+    threads: [unpack, math]
+    exu: {unpack: {require: clean, set: mul_reduce_scalar}, fpu: {require: clean, set: mul_reduce_scalar}}
+    args: {icb0: 0, icb1: 1}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/mul_reduce_scalar.h
+  mul_reduce_scalar_tile:
+    kind: op
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: mul_reduce_scalar}
+      fpu: {require: mul_reduce_scalar}
+      pack: {require: [clean, mul_reduce_scalar_mask], set: mul_reduce_scalar_mask, dirty: true}
+    resources: {dst_math: {require: held}}
+    uninit: mul_reduce_scalar_uninit
+    args: {icb0: 0, icb1: 1, ocb: 2}
+    arch: [wh, bh]
+    experimental: true
+    header: api/compute/experimental/mul_reduce_scalar.h
+  mul_reduce_scalar_tile_fidelity:
+    kind: op
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: mul_reduce_scalar}
+      fpu: {require: mul_reduce_scalar}
+      pack: {require: [clean, mul_reduce_scalar_mask], set: mul_reduce_scalar_mask, dirty: true}
+    resources: {dst_math: {require: held}}
+    uninit: mul_reduce_scalar_uninit
+    args: {icb0: 0, icb1: 1, ocb: 2}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/mul_reduce_scalar.h
+  mul_reduce_scalar_uninit:
+    kind: uninit
+    threads: [pack]
+    exu: {pack: {require: mul_reduce_scalar_mask, set: idle}}
+    arch: [wh, bh]
+    experimental: true
+    header: api/compute/experimental/mul_reduce_scalar.h
+  pack_rows_to_addr_init:
+    kind: init
+    threads: [pack]
+    exu: {pack: {require: [clean, pack_rows_to_addr], set: pack_rows_to_addr, dirty: true}}
+    uninit: pack_rows_to_addr_uninit
+    arch: [quasar]
+    experimental: true
+    header: api/compute/experimental/pack_rows_to_addr.h
+  pack_rows_to_addr:
+    kind: op
+    threads: [pack]
+    exu: {pack: {require: pack_rows_to_addr}}
+    resources: {dst_pack: {require: held}}
+    args: {idst: 0}
+    arch: [quasar]
+    experimental: true
+    header: api/compute/experimental/pack_rows_to_addr.h
+  pack_rows_to_addr_uninit:
+    kind: uninit
+    threads: [pack]
+    exu: {pack: {require: pack_rows_to_addr, set: idle}}
+    arch: [quasar]
+    experimental: true
+    header: api/compute/experimental/pack_rows_to_addr.h
+  pack_block_contiguous_init:
+    kind: init
+    threads: [pack]
+    exu: {pack: {require: clean, set: pack_block_contiguous}}
+    args: {ocb: 0}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/pack_block.h
+  pack_block_contiguous:
+    kind: op
+    threads: [pack]
+    exu: {pack: {require: [pack_block_contiguous, custom_mm_reuse_pack]}}
+    resources: {dst_pack: {require: held}}
+    args: {idst: 0, ocb: 1, ntiles: 2}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/pack_block.h
+  sdpa_custom_mm_block_init:
+    kind: init
+    threads: [unpack, math, pack]
+    exu:
+      unpack: {require: clean, set: sdpa_custom_mm}
+      fpu: {require: clean, set: sdpa_custom_mm}
+      pack: {require: [clean, sdpa_custom_mm_pack], set: sdpa_custom_mm_pack, dirty: true}
+    uninit: sdpa_custom_mm_block_uninit
+    args: {icb0: 0, icb1: 1, ocb: 2}
+    experimental: true
+    header: api/compute/experimental/sdpa_custom_mm.h
+  sdpa_custom_mm_block_init_short:
+    kind: init
+    threads: [unpack, math]
+    exu: {unpack: {require: clean, set: sdpa_custom_mm}, fpu: {require: clean, set: sdpa_custom_mm}}
+    args: {icb0: 0, icb1: 1}
+    experimental: true
+    header: api/compute/experimental/sdpa_custom_mm.h
+  sdpa_custom_mm_block_init_pack_short:
+    kind: init
+    threads: [pack]
+    exu: {pack: {require: [clean, sdpa_custom_mm_pack], set: sdpa_custom_mm_pack, dirty: true}}
+    uninit: sdpa_custom_mm_block_uninit
+    experimental: true
+    header: api/compute/experimental/sdpa_custom_mm.h
+  sdpa_custom_mm_block:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: sdpa_custom_mm}, fpu: {require: sdpa_custom_mm}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1}
+    experimental: true
+    header: api/compute/experimental/sdpa_custom_mm.h
+  sdpa_custom_mm_block_uninit:
+    kind: uninit
+    threads: [pack]
+    exu: {pack: {require: sdpa_custom_mm_pack, set: idle}}
+    experimental: true
+    header: api/compute/experimental/sdpa_custom_mm.h
+  weighted_reduce_init_short:
+    kind: init
+    threads: [unpack]
+    exu: {unpack: {require: [clean, weighted_reduce], set: weighted_reduce, dirty: true}}
+    uninit: weighted_reduce_uninit
+    args: {icb0: 0, icb1: 1}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/sdpa_weighted_reduce.h
+  weighted_reduce_addrmod_init:
+    kind: init
+    threads: [math, pack]
+    exu: {fpu: {require: clean, set: weighted_reduce}, pack: {require: clean, set: weighted_reduce}}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/sdpa_weighted_reduce.h
+  weighted_reduce:
+    kind: op
+    threads: [unpack, math]
+    exu: {unpack: {require: weighted_reduce}, fpu: {require: weighted_reduce}}
+    resources: {dst_math: {require: held}}
+    args: {icb0: 0, icb1: 1}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/sdpa_weighted_reduce.h
+  weighted_reduce_pack:
+    kind: op
+    threads: [pack]
+    exu: {pack: {require: weighted_reduce}}
+    resources: {dst_pack: {require: held}}
+    args: {ocb: 0}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/sdpa_weighted_reduce.h
+  weighted_reduce_uninit:
+    kind: uninit
+    threads: [unpack]
+    exu: {unpack: {require: weighted_reduce, set: idle}}
+    args: {icb0: 0, icb1: 1}
+    arch: [bh]
+    experimental: true
+    header: api/compute/experimental/sdpa_weighted_reduce.h
